@@ -1,0 +1,71 @@
+version: "3"
+
+dotenv: [".env"]
+
+vars:
+  PYTHON: uv run --project {{.TASKFILE_DIR}}
+  CLI: "{{.PYTHON}} snow-utils-pat"
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list-all
+
+  setup:
+    desc: Install dependencies
+    cmds:
+      - uv venv
+      - uv sync
+
+  create:
+    desc: Create/rotate PAT for service user
+    cmds:
+      - "{{.CLI}} create {{.CLI_ARGS}}"
+    env:
+      SA_USER: "{{.SA_USER}}"
+      SA_ROLE: "{{.SA_ROLE}}"
+      SA_ADMIN_ROLE: "{{.SA_ADMIN_ROLE}}"
+      SNOW_UTILS_DB: "{{.SNOW_UTILS_DB}}"
+      DOT_ENV_FILE: "{{.DOT_ENV_FILE}}"
+    vars:
+      SA_USER: '{{.SA_USER | default ""}}'
+      SA_ROLE: '{{.SA_ROLE | default ""}}'
+      SA_ADMIN_ROLE: '{{.SA_ADMIN_ROLE | default ""}}'
+      SNOW_UTILS_DB: '{{.SNOW_UTILS_DB | default ""}}'
+      DOT_ENV_FILE: '{{.DOT_ENV_FILE | default ""}}'
+
+  no-rotate:
+    desc: Create PAT without rotating existing
+    cmds:
+      - "{{.CLI}} create --no-rotate {{.CLI_ARGS}}"
+    env:
+      SA_USER: "{{.SA_USER}}"
+      SA_ROLE: "{{.SA_ROLE}}"
+      SA_ADMIN_ROLE: "{{.SA_ADMIN_ROLE}}"
+      SNOW_UTILS_DB: "{{.SNOW_UTILS_DB}}"
+      DOT_ENV_FILE: "{{.DOT_ENV_FILE}}"
+    vars:
+      SA_USER: '{{.SA_USER | default ""}}'
+      SA_ROLE: '{{.SA_ROLE | default ""}}'
+      SA_ADMIN_ROLE: '{{.SA_ADMIN_ROLE | default ""}}'
+      SNOW_UTILS_DB: '{{.SNOW_UTILS_DB | default ""}}'
+      DOT_ENV_FILE: '{{.DOT_ENV_FILE | default ""}}'
+
+  remove:
+    desc: Remove PAT and associated objects
+    cmds:
+      - "{{.CLI}} remove --yes {{.CLI_ARGS}}"
+    env:
+      SA_USER: "{{.SA_USER}}"
+      SNOW_UTILS_DB: "{{.SNOW_UTILS_DB}}"
+      DOT_ENV_FILE: "{{.DOT_ENV_FILE}}"
+    vars:
+      SA_USER: '{{.SA_USER | default ""}}'
+      SNOW_UTILS_DB: '{{.SNOW_UTILS_DB | default ""}}'
+      DOT_ENV_FILE: '{{.DOT_ENV_FILE | default ""}}'
+
+  help:
+    desc: Show PAT CLI options
+    cmds:
+      - "{{.CLI}} --help"
