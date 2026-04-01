@@ -25,17 +25,28 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import click
 from dotenv import load_dotenv
+
+from snow_utils_pat._keyring_store import (
+    build_pat_credential_service,
+    delete_pat,
+    load_pat,
+    store_pat,
+)
 from snow_utils_pat._network_helpers import (
     assign_network_policy_to_user,
     cleanup_network_for_user,
     get_setup_network_for_user_sql,
     setup_network_for_user,
 )
-from snow_utils_pat._presets import collect_ipv4_cidrs
+from snow_utils_pat._presets import (
+    SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN,
+    collect_ipv4_cidrs,
+)
 from snow_utils_pat._snow import (
     get_snow_cli_options,
     run_snow_sql,
@@ -43,6 +54,30 @@ from snow_utils_pat._snow import (
     set_masking,
     set_snow_cli_options,
 )
+from snow_utils_pat._verify_pat_connector import verify_pat_with_connector
+
+# Older layouts stored the raw PAT in .env; strip when rewriting .env (not used for auth).
+_LEGACY_DOTENV_RAW_PAT_KEY = "SA_PAT"
+
+
+def _confirm_remove_step(*, skip_all_prompts: bool, message: str) -> bool:
+    """If skip_all_prompts, return True. Else prompt; return False if user declines."""
+    if skip_all_prompts:
+        return True
+    if not click.confirm(message, default=False):
+        click.echo("Aborted.")
+        return False
+    return True
+
+
+def _strip_obsolete_dotenv_pat_lines(content: str) -> str:
+    """Remove obsolete .env lines that stored a raw PAT (pre-keyring releases)."""
+    return re.sub(
+        rf"^{_LEGACY_DOTENV_RAW_PAT_KEY}=.*\n?",
+        "",
+        content,
+        flags=re.MULTILINE,
+    )
 
 
 def get_snowflake_account() -> str:
@@ -70,6 +105,40 @@ def get_snowflake_account() -> str:
     return account
 
 
+def get_snowflake_connection_metadata() -> tuple[str, str | None]:
+    """Return (account, host) from `snow connection test --format json`. Host may be absent."""
+    result = subprocess.run(
+        ["snow", "connection", "test", "--format", "json"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise click.ClickException(f"Failed to test connection: {result.stderr}")
+
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise click.ClickException(
+            f"Invalid JSON from connection test: {e}\nOutput: {result.stdout[:500]}"
+        )
+
+    account = data.get("Account") or data.get("account")
+    if not account:
+        raise click.ClickException(
+            f"Could not find 'Account' in connection test output: {list(data.keys())}"
+        )
+
+    host = (
+        data.get("Host")
+        or data.get("host")
+        or data.get("SnowflakeHost")
+        or data.get("snowflake_host")
+    )
+    if host is not None:
+        host = str(host).strip() or None
+    return str(account).strip(), host
+
+
 def normalize_identifier(name: str, style: str = "snowflake") -> str:
     """Normalize name for SQL or DNS compliance.
 
@@ -89,13 +158,6 @@ def normalize_identifier(name: str, style: str = "snowflake") -> str:
         return clean.upper()
     else:
         return clean.lower()
-
-    account = data.get("Account")
-    if not account:
-        raise click.ClickException(
-            f"Account not found in connection test response: {list(data.keys())}"
-        )
-    return account
 
 
 def infer_comment_prefix(user: str) -> str:
@@ -122,7 +184,7 @@ def format_comment(comment_prefix: str, suffix: str = "") -> str:
     return f"Used by {normalized} app{suffix} - managed by snow-utils-pat"
 
 
-def get_service_user_sql(
+def get_service_user_and_role_sql(
     user: str, pat_role: str, comment_prefix: str, admin_role: str = "accountadmin"
 ) -> str:
     """Generate SQL for creating service user and role (idempotent)."""
@@ -131,7 +193,6 @@ def get_service_user_sql(
 -- Create PAT role if not exists
 CREATE ROLE IF NOT EXISTS {pat_role}
     COMMENT = '{comment}';
-GRANT ROLE {pat_role} TO ROLE SYSADMIN;
 -- Create service user
 CREATE USER IF NOT EXISTS {user}
     TYPE = SERVICE
@@ -144,7 +205,7 @@ def setup_service_user(
 ) -> None:
     """Create PAT role (if needed) and service user, then grant role (idempotent)."""
     click.echo(f"Setting up PAT role {pat_role} and service user {user}")
-    sql = get_service_user_sql(user, pat_role, comment_prefix, admin_role)
+    sql = get_service_user_and_role_sql(user, pat_role, comment_prefix, admin_role)
     run_snow_sql_stdin(sql)
     click.echo(f"✓ Role {pat_role} and service user {user} configured")
 
@@ -286,28 +347,20 @@ def _escape_env_value(value: str) -> str:
     return f'"{escaped}"'
 
 
-def update_env(env_path: Path, user: str, password: str, pat_role: str) -> None:
-    """Update .env file with the new SA_PAT, SA_USER, and SA_ROLE."""
+def update_env_non_secrets(env_path: Path, user: str, pat_role: str) -> None:
+    """Update .env with SA_USER and SA_ROLE; strip obsolete raw-PAT lines (PAT is keyring-only)."""
     if not env_path.exists():
         click.echo(f"⚠ {env_path} not found, skipping update")
         return
 
     content = env_path.read_text()
-
     backup_path = env_path.with_suffix(".env.bak")
     shutil.copy(env_path, backup_path)
 
-    pat_pattern = r"^SA_PAT=.*$"
-    pat_replacement = f"SA_PAT={_escape_env_value(password)}"
-
-    if re.search(pat_pattern, content, re.MULTILINE):
-        new_content = re.sub(pat_pattern, pat_replacement, content, flags=re.MULTILINE)
-    else:
-        new_content = content.rstrip() + f"\n{pat_replacement}\n"
+    new_content = _strip_obsolete_dotenv_pat_lines(content)
 
     user_pattern = r"^SA_USER=.*$"
     user_replacement = f"SA_USER={_escape_env_value(user)}"
-
     if re.search(user_pattern, new_content, re.MULTILINE):
         new_content = re.sub(user_pattern, user_replacement, new_content, flags=re.MULTILINE)
     else:
@@ -315,18 +368,17 @@ def update_env(env_path: Path, user: str, password: str, pat_role: str) -> None:
 
     role_pattern = r"^SA_ROLE=.*$"
     role_replacement = f"SA_ROLE={_escape_env_value(pat_role)}"
-
     if re.search(role_pattern, new_content, re.MULTILINE):
         new_content = re.sub(role_pattern, role_replacement, new_content, flags=re.MULTILINE)
     else:
         new_content = new_content.rstrip() + f"\n{role_replacement}\n"
 
     env_path.write_text(new_content)
-    click.echo(f"✓ Updated {env_path} with new SA_PAT, SA_USER, and SA_ROLE")
+    click.echo(f"✓ Updated {env_path} with SA_USER and SA_ROLE (PAT stored in keyring only)")
 
 
 def clear_env(env_path: Path) -> None:
-    """Clear PAT credentials from .env file."""
+    """Remove obsolete raw-PAT lines from .env if present (same cleanup as non-secret updates)."""
     if not env_path.exists():
         click.echo(f"⚠ {env_path} not found, skipping")
         return
@@ -337,49 +389,40 @@ def clear_env(env_path: Path) -> None:
     shutil.copy(env_path, backup_path)
     click.echo(f"✓ Created backup: {backup_path}")
 
-    pat_pattern = r"^SA_PAT=.*$"
-    new_content = re.sub(pat_pattern, 'SA_PAT=""', content, flags=re.MULTILINE)
+    new_content = _strip_obsolete_dotenv_pat_lines(content)
 
     env_path.write_text(new_content)
-    click.echo(f"✓ Cleared SA_PAT in {env_path}")
+    click.echo(f"✓ Removed obsolete file-stored PAT lines from {env_path}")
 
 
-def verify_connection(user: str, password: str, pat_role: str) -> None:
-    """Verify the PAT connection works."""
+def verify_connection(
+    user: str,
+    pat_token: str,
+    pat_role: str,
+    account: str | None = None,
+    host: str | None = None,
+) -> None:
+    """Verify the PAT using the Python connector (PROGRAMMATIC_ACCESS_TOKEN).
+
+    Avoids ``snow sql`` with ``SNOWFLAKE_PASSWORD`` (see snow-utils-pat skill Step 6).
+    """
     click.echo("Verifying connection with PAT...")
 
-    account = get_snowflake_account()
-
-    cmd = [
-        "snow",
-        "sql",
-        *get_snow_cli_options().get_flags(),
-        "-x",
-        "--user",
-        user,
-        "--account",
-        account,
-        "--role",
-        pat_role,
-        "-q",
-        "SELECT current_timestamp()",
-    ]
+    acct = account if account is not None else get_snowflake_account()
 
     if get_snow_cli_options().debug:
-        click.echo(f"[DEBUG] Running: {' '.join(cmd)}")
+        click.echo(
+            f"[DEBUG] verify_pat_with_connector account={acct!r} user={user!r} "
+            f"role={pat_role!r} host={host!r}"
+        )
 
-    result = subprocess.run(
-        cmd,
-        env={**os.environ, "SNOWFLAKE_PASSWORD": password},
-        capture_output=True,
-        text=True,
+    verify_pat_with_connector(
+        account=acct,
+        user=user,
+        role=pat_role,
+        pat_token=pat_token,
+        host=host,
     )
-
-    if get_snow_cli_options().debug and result.stderr:
-        click.echo(f"[DEBUG] stderr: {result.stderr}")
-
-    if result.returncode != 0:
-        raise click.ClickException(f"Connection verification failed: {result.stderr}")
 
     click.echo("✓ Connection verified successfully")
 
@@ -406,10 +449,11 @@ def cli(ctx: click.Context, verbose: bool, debug: bool, comment: str | None) -> 
 
     \b
     Commands:
-        create  - Create/rotate PAT for service user
-        rotate  - Rotate existing PAT (keep policies)
-        verify  - Test PAT connection
-        remove  - Remove PAT and associated objects
+        create   - Create/rotate PAT for service user
+        rotate   - Rotate existing PAT (keep policies)
+        verify   - Test PAT connection (PAT from keyring only)
+        show-pat - Print PAT from keyring to stdout (insecure)
+        remove   - Remove PAT and associated objects
     """
     set_snow_cli_options(verbose=verbose, debug=debug)
     ctx.ensure_object(dict)
@@ -438,20 +482,30 @@ def cli(ctx: click.Context, verbose: bool, debug: bool, comment: str | None) -> 
     default=True,
     help="Include local IP (default: True)",
 )
-@click.option("--allow-gh", is_flag=True, default=False, help="Include GitHub Actions IPs")
+@click.option(
+    "--allow-gh",
+    is_flag=True,
+    default=False,
+    help=(
+        "Allow GitHub Actions via Snowflake-managed rule "
+        f"{SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN} (hybrid policy; not gov regions)"
+    ),
+)
 @click.option("--allow-google", is_flag=True, default=False, help="Include Google IPs")
 @click.option("--extra-cidrs", multiple=True, help="Additional CIDRs (can be repeated)")
 @click.option(
     "--default-expiry-days",
-    default=15,
+    default=7,
     type=int,
-    help="Default PAT expiry days (Snowflake default: 15)",
+    help="Default PAT expiry days (secure default: 7; use 15 to match Snowflake platform default)",
 )
 @click.option(
     "--max-expiry-days",
-    default=365,
+    default=30,
     type=int,
-    help="Maximum PAT expiry days (Snowflake default: 365)",
+    help=(
+        "Maximum PAT expiry days (secure default: 30; use 365 to match Snowflake platform default)"
+    ),
 )
 @click.option("--dry-run", is_flag=True, help="Preview without making changes")
 @click.option(
@@ -482,7 +536,14 @@ def cli(ctx: click.Context, verbose: bool, debug: bool, comment: str | None) -> 
     "--dot-env-file",
     type=click.Path(path_type=Path),
     default=None,
-    help="Write SA_PAT directly to this .env file (avoids token leaking in shell history)",
+    help="Also update this .env with SA_USER and SA_ROLE only (PAT is never written to disk)",
+)
+@click.option(
+    "--print",
+    "print_token",
+    is_flag=True,
+    default=False,
+    help="Print PAT to stdout after storing in keyring (insecure; cannot use with -o json)",
 )
 @click.option(
     "--yes",
@@ -513,6 +574,7 @@ def create_command(
     output: str,
     skip_network: bool,
     dot_env_file: Path | None,
+    print_token: bool,
     yes: bool,
 ) -> None:
     """
@@ -527,8 +589,8 @@ def create_command(
     2. Create network rule and policy (unless --skip-network)
     3. Create authentication policy
     4. Create or rotate PAT
-    5. Update .env file
-    6. Verify connection
+    5. Store PAT in OS keyring; update .env with SA_USER and SA_ROLE only
+    6. Verify connection using PAT loaded from keyring
 
     \b
     Examples:
@@ -538,21 +600,23 @@ def create_command(
         # Skip network (created by snow-utils-networks skill)
         pat.py create --user my_sa --role demo_role --db my_db --skip-network
 
-        # Include GitHub Actions IPs for CI/CD
+        # Allow GitHub Actions (Snowflake-managed network rule on the policy)
         pat.py create --user ci_sa --role ci_role --db my_db --allow-gh
     """
     if not pat_name:
         pat_name = f"{user}_pat".upper()
 
+    if print_token and output == "json":
+        raise click.UsageError("--print cannot be used with -o json")
+
     cidrs: list[str] = []
     if not skip_network:
         cidrs = collect_ipv4_cidrs(
             with_local=allow_local,
-            with_gh=allow_gh,
             with_google=allow_google,
             extra_cidrs=list(extra_cidrs) if extra_cidrs else None,
         )
-        if not cidrs:
+        if not cidrs and not allow_gh:
             raise click.ClickException(
                 "Network policy required for PAT security. "
                 "Use --allow-local (default), --allow-gh, --allow-google, or --extra-cidrs"
@@ -560,7 +624,7 @@ def create_command(
 
     comment_prefix = ctx.obj.get("comment") or infer_comment_prefix(user)
 
-    def build_result(status: str, token: str | None = None) -> dict:
+    def build_result(status: str) -> dict:
         result = {
             "status": status,
             "user": user,
@@ -577,8 +641,10 @@ def create_command(
             result["resources"]["network_rule"] = f"{db}.NETWORKS.{user}_NETWORK_RULE".upper()
             result["resources"]["network_policy"] = f"{user}_NETWORK_POLICY".upper()
             result["cidrs_count"] = len(cidrs)
-        if token:
-            result["token"] = token
+            if allow_gh:
+                result["resources"]["snowflake_managed_github_rule"] = (
+                    SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN
+                )
         return result
 
     if output == "json" and dry_run:
@@ -598,7 +664,9 @@ def create_command(
         click.echo(f"Database: {db}")
         click.echo(f"PAT Name: {pat_name}")
         if not skip_network:
-            click.echo(f"CIDRs:    {len(cidrs)} entries")
+            click.echo(f"CIDRs:    {len(cidrs)} custom rule entr{'y' if len(cidrs) == 1 else 'ies'}")
+            if allow_gh:
+                click.echo(f"GitHub:   {SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN} (hybrid policy)")
         else:
             click.echo("Network:  (skipped - delegated to snow-utils-networks)")
         click.echo()
@@ -608,7 +676,7 @@ def create_command(
         click.echo("SQL that would be executed:")
         click.echo("─" * 60)
         click.echo("-- Step 1: Create service user")
-        click.echo(get_service_user_sql(user, role, comment_prefix, admin_role))
+        click.echo(get_service_user_and_role_sql(user, role, comment_prefix, admin_role))
         click.echo()
         if not skip_network:
             click.echo("-- Step 2: Create network rule and policy")
@@ -620,6 +688,7 @@ def create_command(
                     force=force,
                     comment_prefix=comment_prefix,
                     admin_role=admin_role,
+                    allow_managed_github=allow_gh,
                 )
             )
             click.echo()
@@ -649,7 +718,8 @@ def create_command(
     )
 
     if not skip_network:
-        click.echo(f"Setting up network rule and policy ({len(cidrs)} CIDRs)...")
+        gh_note = f", hybrid with {SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN}" if allow_gh else ""
+        click.echo(f"Setting up network rule and policy ({len(cidrs)} custom CIDRs{gh_note})...")
         rule_fqn, policy_name = setup_network_for_user(
             user=user,
             db=db,
@@ -657,8 +727,14 @@ def create_command(
             force=force,
             comment_prefix=comment_prefix,
             admin_role=admin_role,
+            allow_managed_github=allow_gh,
         )
-        click.echo(f"✓ Network rule: {rule_fqn}")
+        if rule_fqn:
+            click.echo(f"✓ Network rule: {rule_fqn}")
+        else:
+            click.echo(
+                "✓ Network rule: (skipped; policy allows Snowflake-managed GitHub Actions only)"
+            )
         click.echo(f"✓ Network policy: {policy_name}")
         assign_network_policy_to_user(user, policy_name, admin_role=admin_role)
         click.echo(f"✓ Assigned network policy to user {user}")
@@ -678,33 +754,48 @@ def create_command(
         user=user, pat_role=role, pat_name=pat_name, rotate=rotate, admin_role=admin_role
     )
 
-    # When --dot-env-file is provided, write SA_PAT directly to that file
-    # so the raw token never appears in shell command text (security).
-    target_env = dot_env_file if dot_env_file else env_path
+    account, host = get_snowflake_connection_metadata()
+    try:
+        store_pat(host, account, user, pat_name, password)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from e
 
-    if output == "text":
-        update_env(env_path=target_env, user=user, password=password, pat_role=role)
+    if print_token:
+        click.echo(
+            "WARNING: PAT printed to stdout; may appear in shell history and CI logs.",
+            err=True,
+        )
+        click.echo(password)
 
-    if not skip_verify and output == "text":
-        verify_connection(user=user, password=password, pat_role=role)
+    update_env_non_secrets(env_path, user, role)
+    if dot_env_file:
+        update_env_non_secrets(dot_env_file, user, role)
+
+    if not skip_verify:
+        loaded = load_pat(host, account, user, pat_name)
+        if not loaded:
+            raise click.ClickException(
+                "PAT not found in keyring immediately after store; cannot verify."
+            )
+        verify_connection(user=user, pat_token=loaded, pat_role=role, account=account, host=host)
 
     if output == "json":
-        result = build_result("success", password)
+        result = build_result("success")
         result["cidrs"] = cidrs
-        result["env_file"] = str(target_env)
-        # When --dot-env-file is used, redact the token from JSON output
-        if dot_env_file:
-            update_env(env_path=dot_env_file, user=user, password=password, pat_role=role)
-            result["pat"] = "***REDACTED***"
-            result["pat_written_to"] = str(dot_env_file)
+        result["account"] = account
+        result["host"] = host if host else "NA"
+        result["keyring_service"] = build_pat_credential_service(host, account, user, pat_name)
+        result["pat"] = "***REDACTED***"
+        result["env_files_updated"] = [str(env_path)] + (
+            [str(dot_env_file)] if dot_env_file else []
+        )
         click.echo(json.dumps(result, indent=2))
         return
 
     click.echo()
     click.echo("=" * 50)
     click.echo("✓ PAT setup completed successfully!")
-    if dot_env_file:
-        click.echo(f"  SA_PAT written to {dot_env_file} (token NOT shown in output)")
+    click.echo("  PAT stored in OS keyring (not written to .env)")
     click.echo("=" * 50)
 
 
@@ -726,7 +817,13 @@ def create_command(
     default=Path(".env"),
     help=".env file path",
 )
-@click.confirmation_option(prompt="Remove PAT and associated objects?")
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    default=False,
+    help="Skip per-step confirmation prompts (required in non-interactive terminals)",
+)
 def remove_command(
     user: str,
     db: str,
@@ -735,9 +832,13 @@ def remove_command(
     pat_only: bool,
     admin_role: str,
     env_path: Path,
+    yes: bool,
 ) -> None:
     """
     Remove PAT and associated objects for a service user.
+
+    Each destructive step asks for confirmation unless --yes. Step 5 only strips
+    legacy raw-PAT lines from .env (no confirmation).
 
     \b
     Steps:
@@ -745,7 +846,7 @@ def remove_command(
     2. Remove network policy and rule (unless --pat-only)
     3. Remove authentication policy (unless --pat-only)
     4. Drop service user (if --drop-user)
-    5. Clear .env credentials
+    5. Strip legacy PAT lines from .env (SA_USER / SA_ROLE unchanged)
     """
     click.echo("=" * 50)
     click.echo("Snowflake PAT Manager - Remove")
@@ -760,36 +861,87 @@ def remove_command(
     click.echo(f"PAT Name: {pat_name}")
     click.echo()
 
+    if not yes and not sys.stdin.isatty():
+        raise click.ClickException(
+            "Non-interactive terminal: pass --yes to confirm all remove steps."
+        )
+
     click.echo("─" * 40)
     click.echo("Step 1: Remove PAT")
     click.echo("─" * 40)
+    if not _confirm_remove_step(
+        skip_all_prompts=yes,
+        message=(
+            f"Remove PAT '{pat_name}' from Snowflake user {user} and delete the "
+            "matching OS keyring entry (if present)?"
+        ),
+    ):
+        return
+
+    try:
+        acc, h = get_snowflake_connection_metadata()
+        delete_pat(h, acc, user, pat_name)
+        click.echo("✓ Removed PAT from OS keyring (if present)")
+    except click.ClickException as e:
+        click.echo(f"⚠ Keyring cleanup skipped: {e}", err=True)
+
     remove_pat(user=user, pat_name=pat_name, admin_role=admin_role)
     click.echo()
 
     if not pat_only:
+        net_rule = f"{user}_NETWORK_RULE".upper()
+        net_policy = f"{user}_NETWORK_POLICY".upper()
+        rule_fqn = f"{db.upper()}.NETWORKS.{net_rule}"
         click.echo("─" * 40)
-        click.echo("Step 2: Remove Network Policy")
+        click.echo("Step 2: Remove network policy and rule")
         click.echo("─" * 40)
+        click.echo(f"  Unset NETWORK_POLICY on user {user}")
+        click.echo(f"  Drop network policy: {net_policy}")
+        click.echo(f"  Drop network rule:   {rule_fqn}")
+        click.echo()
+        if not _confirm_remove_step(
+            skip_all_prompts=yes,
+            message="Proceed with Step 2 (network policy and rule removal)?",
+        ):
+            return
         cleanup_network_for_user(user=user, db=db, admin_role=admin_role)
         click.echo("✓ Network policy and rule removed")
         click.echo()
 
+        auth_policy_name = f"{user}_auth_policy".upper()
+        auth_fqn = f"{db}.POLICIES.{auth_policy_name}"
         click.echo("─" * 40)
-        click.echo("Step 3: Remove Authentication Policy")
+        click.echo("Step 3: Remove authentication policy")
         click.echo("─" * 40)
+        click.echo(f"  Drop authentication policy: {auth_fqn}")
+        click.echo()
+        if not _confirm_remove_step(
+            skip_all_prompts=yes,
+            message=f"Proceed with Step 3 (remove {auth_fqn})?",
+        ):
+            return
         remove_auth_policy(user=user, db=db, admin_role=admin_role)
         click.echo()
 
     if drop_user:
         click.echo("─" * 40)
-        click.echo("Step 4: Drop Service User")
+        click.echo("Step 4: Drop service user")
         click.echo("─" * 40)
+        click.echo(f"  DROP USER {user}")
+        click.echo()
+        if not _confirm_remove_step(
+            skip_all_prompts=yes,
+            message=f"Proceed with Step 4 (drop service user {user})?",
+        ):
+            return
         remove_service_user(user=user, admin_role=admin_role)
         click.echo()
 
+    # Step 5: non-secret cleanup only — no confirmation (legacy raw-PAT lines in .env).
     click.echo("─" * 40)
-    click.echo("Step 5: Clear .env Credentials")
+    click.echo("Step 5: Strip legacy PAT lines from .env")
     click.echo("─" * 40)
+    click.echo(f"  File: {env_path} (SA_USER / SA_ROLE are not removed)")
     clear_env(env_path=env_path)
     click.echo()
 
@@ -817,6 +969,13 @@ def remove_command(
 @click.option(
     "-o", "--output", type=click.Choice(["text", "json"]), default="text", help="Output format"
 )
+@click.option(
+    "--print",
+    "print_token",
+    is_flag=True,
+    default=False,
+    help="Print PAT to stdout after storing in keyring (insecure; cannot use with -o json)",
+)
 def rotate_command(
     user: str,
     role: str,
@@ -825,12 +984,13 @@ def rotate_command(
     env_path: Path,
     skip_verify: bool,
     output: str,
+    print_token: bool,
 ) -> None:
     """
     Rotate an existing PAT for a service user.
 
     This regenerates the PAT token while keeping all policies intact.
-    The new token will be saved to the .env file.
+    The new token is stored in the OS keyring; .env is updated with SA_USER and SA_ROLE only.
 
     \b
     Examples:
@@ -842,6 +1002,9 @@ def rotate_command(
     """
     if not pat_name:
         pat_name = f"{user}_pat".upper()
+
+    if print_token and output == "json":
+        raise click.UsageError("--print cannot be used with -o json")
 
     click.echo("=" * 50)
     click.echo("Snowflake PAT Manager - Rotate")
@@ -861,11 +1024,28 @@ def rotate_command(
         user=user, pat_role=role, pat_name=pat_name, rotate=True, admin_role=admin_role
     )
 
-    if output == "text":
-        update_env(env_path=env_path, user=user, password=password, pat_role=role)
+    account, host = get_snowflake_connection_metadata()
+    try:
+        store_pat(host, account, user, pat_name, password)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from e
+
+    if print_token:
+        click.echo(
+            "WARNING: PAT printed to stdout; may appear in shell history and CI logs.",
+            err=True,
+        )
+        click.echo(password)
+
+    update_env_non_secrets(env_path, user, role)
 
     if not skip_verify:
-        verify_connection(user=user, password=password, pat_role=role)
+        loaded = load_pat(host, account, user, pat_name)
+        if not loaded:
+            raise click.ClickException(
+                "PAT not found in keyring immediately after store; cannot verify."
+            )
+        verify_connection(user=user, pat_token=loaded, pat_role=role, account=account, host=host)
 
     if output == "json":
         result = {
@@ -873,64 +1053,53 @@ def rotate_command(
             "user": user,
             "pat_name": pat_name,
             "pat_role": role,
-            "token": password,
+            "account": account,
+            "host": host if host else "NA",
+            "keyring_service": build_pat_credential_service(host, account, user, pat_name),
+            "pat": "***REDACTED***",
         }
         click.echo(json.dumps(result, indent=2))
     else:
         click.echo()
         click.echo("=" * 50)
         click.echo("✓ PAT rotated successfully!")
+        click.echo("  PAT stored in OS keyring (not written to .env)")
         click.echo("=" * 50)
 
 
 @cli.command(name="verify")
 @click.option("--user", "-u", required=True, envvar="SA_USER", help="Service account user name")
 @click.option("--role", "-r", required=True, envvar="SA_ROLE", help="Role for the PAT")
-@click.option("--password", "-p", envvar="SA_PAT", help="PAT token (or use SA_PAT env var)")
 @click.option(
-    "--env-path",
-    type=click.Path(path_type=Path),
-    default=Path(".env"),
-    help=".env file to read token from",
+    "--pat-name",
+    default=None,
+    envvar="PAT_NAME",
+    help="PAT name in Snowflake (default: {USER}_PAT)",
 )
 def verify_command(
     user: str,
     role: str,
-    password: str | None,
-    env_path: Path,
+    pat_name: str | None,
 ) -> None:
     """
     Verify PAT connection works correctly.
 
-    Tests the PAT by connecting to Snowflake and running a simple query.
-    The token can be provided via --password, SA_PAT env var, or read from .env file.
+    Loads the PAT from the OS keyring only (same entry as create/rotate). There is no
+    password flag, env-based PAT, or .env secret fallback.
 
     \b
-    Examples:
-        # Verify using SA_PAT env var
-        pat.py verify --user my_sa --role demo_role
-
-        # Verify with explicit token
-        pat.py verify --user my_sa --role demo_role --password "token..."
-
-        # Verify reading from .env
-        pat.py verify --user my_sa --role demo_role --env-path .env
+    Example:
+        snow-utils-pat verify --user my_sa --role demo_role
     """
-    if not password:
-        if env_path.exists():
-            content = env_path.read_text()
-            import re
+    if not pat_name:
+        pat_name = f"{user}_pat".upper()
 
-            match = re.search(
-                r'^SA_PAT\s*=\s*["\']?([^"\'#\n]+)["\']?', content, re.MULTILINE
-            )
-            if match:
-                password = match.group(1).strip()
-                click.echo(f"Using token from {env_path}")
-
+    account, host = get_snowflake_connection_metadata()
+    password = load_pat(host, account, user, pat_name)
     if not password:
         raise click.ClickException(
-            "No PAT token provided. Use --password, SA_PAT env var, or ensure .env contains SA_PAT"
+            "No PAT found in keyring for this Snowflake connection, user, and PAT name. "
+            "Run `create` or `rotate` first."
         )
 
     click.echo("=" * 50)
@@ -940,12 +1109,62 @@ def verify_command(
     click.echo(f"Role: {role}")
     click.echo()
 
-    verify_connection(user=user, password=password, pat_role=role)
+    verify_connection(user=user, pat_token=password, pat_role=role, account=account, host=host)
 
     click.echo()
     click.echo("=" * 50)
     click.echo("✓ PAT verification successful!")
     click.echo("=" * 50)
+
+
+@cli.command("show-pat")
+@click.option("--user", "-u", required=True, envvar="SA_USER", help="Service account user name")
+@click.option(
+    "--pat-name",
+    default=None,
+    envvar="PAT_NAME",
+    help="PAT name in Snowflake (default: {USER}_PAT)",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    default=False,
+    help="Skip confirmation before printing (unsafe in logged or shared terminals)",
+)
+def show_pat_command(user: str, pat_name: str | None, yes: bool) -> None:
+    """
+    Print the PAT from the OS keyring to stdout (insecure).
+
+    Prompts for confirmation unless --yes. The secret may appear in shell history,
+    terminal scrollback, CI logs, observability tools, and screen sharing.
+    """
+    if not pat_name:
+        pat_name = f"{user}_pat".upper()
+
+    account, host = get_snowflake_connection_metadata()
+    secret = load_pat(host, account, user, pat_name)
+    if not secret:
+        raise click.ClickException(
+            "No PAT found in keyring for this Snowflake connection, user, and PAT name."
+        )
+
+    if not yes:
+        if not click.confirm(
+            "WARNING: The raw PAT will be printed to stdout.\n"
+            "It may be captured in shell history, terminal scrollback, CI logs, "
+            "observability pipelines, and screen sharing.\n\n"
+            "Do you want to continue?",
+            default=False,
+        ):
+            click.echo("Aborted.")
+            return
+
+    click.echo(
+        "WARNING: PAT is printed to stdout; may be captured in shell history or logs.",
+        err=True,
+    )
+    click.echo(secret)
 
 
 if __name__ == "__main__":

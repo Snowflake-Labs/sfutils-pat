@@ -1,10 +1,17 @@
 """
 IPv4 preset providers for snow-utils-pat.
 
-Provides IPv4 CIDR collection from presets (GitHub Actions, Google, local IP)
-for PAT network rule creation. Copied from snow-utils-common so this package
-is fully self-contained.
+Provides IPv4 CIDR collection from presets (local IP, Google, extra CIDRs) for
+the custom network rule. GitHub Actions ingress uses Snowflake-managed rules
+(see SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN) referenced from the network
+policy, not GitHub meta API lists. Copied from snow-utils-common so this
+package is fully self-contained.
 """
+
+# Snowflake-managed ingress rule for GitHub Actions (hybrid policy). Confirm in-account with:
+# SHOW NETWORK RULES IN SNOWFLAKE.NETWORK_SECURITY;
+# See https://docs.snowflake.com/en/user-guide/network-rules.html#snowflake-managed-network-rules
+SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN = "SNOWFLAKE.NETWORK_SECURITY.GITHUB_ACTIONS"
 
 from enum import Enum
 from functools import lru_cache
@@ -57,7 +64,10 @@ def _is_ipv4_cidr(cidr: str) -> bool:
 
 @lru_cache(maxsize=1)
 def get_github_actions_ips() -> tuple[str, ...]:
-    """Fetch GitHub Actions runner IPv4 CIDRs from GitHub meta API."""
+    """Fetch GitHub Actions runner IPv4 CIDRs from GitHub meta API (legacy / optional tooling).
+
+    ``snow-utils-pat create --allow-gh`` uses SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN instead.
+    """
     response = requests.get("https://api.github.com/meta", timeout=30)
     response.raise_for_status()
     all_ips = response.json().get("actions", [])
@@ -82,17 +92,14 @@ def get_local_ip() -> str:
 
 def collect_ipv4_cidrs(
     with_local: bool = True,
-    with_gh: bool = False,
     with_google: bool = False,
     extra_cidrs: list[str] | None = None,
 ) -> list[str]:
-    """Collect IPv4 CIDRs from enabled presets and extra values."""
+    """Collect IPv4 CIDRs for the custom user network rule (not GitHub; use managed rule + policy)."""
     cidrs: list[str] = []
 
     if with_local:
         cidrs.append(get_local_ip())
-    if with_gh:
-        cidrs.extend(get_github_actions_ips())
     if with_google:
         cidrs.extend(get_google_ips())
     if extra_cidrs:

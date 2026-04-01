@@ -11,10 +11,11 @@ import re
 import click
 
 from snow_utils_pat._presets import (
+    SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN,
     NetworkRuleMode,
     NetworkRuleType,
-    validate_mode_type,
     get_valid_types_for_mode,
+    validate_mode_type,
 )
 from snow_utils_pat._snow import run_snow_sql, run_snow_sql_stdin
 
@@ -90,12 +91,29 @@ def detach_rule_from_policy(policy_name: str, admin_role: str = "accountadmin") 
     run_snow_sql_stdin(sql)
 
 
-def reattach_rule_to_policy(
-    policy_name: str, rule_fqn: str, admin_role: str = "accountadmin"
+def set_policy_allowed_rule_list(
+    policy_name: str, rule_refs: list[str], admin_role: str = "accountadmin"
 ) -> None:
-    """Re-attach a rule to a policy."""
-    sql = f"USE ROLE {admin_role};\nALTER NETWORK POLICY IF EXISTS {policy_name} SET ALLOWED_NETWORK_RULE_LIST = ('{rule_fqn}');"
+    """Set a network policy's ALLOWED_NETWORK_RULE_LIST (replaces previous list)."""
+    if not rule_refs:
+        detach_rule_from_policy(policy_name, admin_role=admin_role)
+        return
+    rule_list = ", ".join(f"'{r}'" for r in rule_refs)
+    sql = f"USE ROLE {admin_role};\nALTER NETWORK POLICY IF EXISTS {policy_name} SET ALLOWED_NETWORK_RULE_LIST = ({rule_list});"
     run_snow_sql_stdin(sql)
+
+
+def build_hybrid_policy_rule_refs(
+    custom_rule_fqn: str | None,
+    include_managed_github: bool,
+) -> list[str]:
+    """Build ALLOWED_NETWORK_RULE_LIST entries: optional custom rule + optional SaaS GitHub rule."""
+    refs: list[str] = []
+    if custom_rule_fqn:
+        refs.append(custom_rule_fqn)
+    if include_managed_github:
+        refs.append(SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN)
+    return refs
 
 
 def create_network_rule(
@@ -109,13 +127,21 @@ def create_network_rule(
     dry_run: bool = False,
     force: bool = False,
     admin_role: str = "accountadmin",
+    policy_rule_refs: list[str] | None = None,
 ) -> str:
-    """Create a network rule in Snowflake. Returns fully qualified name."""
+    """Create a network rule in Snowflake. Returns fully qualified name.
+
+    If the rule is attached to the expected user policy, it is detached before
+    CREATE OR REPLACE and re-attached with ``policy_rule_refs`` when provided
+    (hybrid policies with Snowflake-managed rules); otherwise only this rule.
+    """
     if not validate_mode_type(mode, rule_type):
         valid = get_valid_types_for_mode(mode)
         raise click.ClickException(
             f"Invalid type '{rule_type.value}' for mode '{mode.value}'. Valid types: {valid}"
         )
+    if not values:
+        raise click.ClickException("Network rule VALUE_LIST cannot be empty")
 
     rule_fqn = f"{db}.{schema}.{name}"
     sql = get_network_rule_sql(name, db, schema, values, mode, rule_type, comment, force)
@@ -136,8 +162,9 @@ def create_network_rule(
 
         if attached_policies:
             click.echo(f"  Re-attaching rule to {len(attached_policies)} policy(ies)...")
+            restore_refs = policy_rule_refs if policy_rule_refs is not None else [rule_fqn]
             for policy in attached_policies:
-                reattach_rule_to_policy(policy, rule_fqn, admin_role=admin_role)
+                set_policy_allowed_rule_list(policy, restore_refs, admin_role=admin_role)
 
     return rule_fqn
 
@@ -177,6 +204,7 @@ def get_setup_network_for_user_sql(
     force: bool = False,
     comment_prefix: str | None = None,
     admin_role: str = "accountadmin",
+    allow_managed_github: bool = False,
 ) -> str:
     """Generate SQL for creating network rule and policy for a user."""
     rule_name = f"{user}_NETWORK_RULE".upper()
@@ -185,25 +213,38 @@ def get_setup_network_for_user_sql(
     user_part = normalize_identifier(comment_prefix or user, "snowflake")
     project_part = normalize_identifier(db, "snowflake")
 
-    rule_sql = get_network_rule_sql(
-        name=rule_name,
-        db=db.upper(),
-        schema=schema.upper(),
-        values=cidrs,
-        mode=NetworkRuleMode.INGRESS,
-        rule_type=NetworkRuleType.IPV4,
-        comment=f"Used by {user_part} - {project_part} app - managed by snow-utils-networks",
-        force=force,
+    policy_refs = build_hybrid_policy_rule_refs(
+        custom_rule_fqn=rule_fqn if cidrs else None,
+        include_managed_github=allow_managed_github,
     )
+    if not policy_refs:
+        raise click.ClickException(
+            "Network policy requires at least one allowed rule (custom CIDRs or --allow-gh)."
+        )
+
+    chunks: list[str] = [f"USE ROLE {admin_role};"]
+    if cidrs:
+        rule_sql = get_network_rule_sql(
+            name=rule_name,
+            db=db.upper(),
+            schema=schema.upper(),
+            values=cidrs,
+            mode=NetworkRuleMode.INGRESS,
+            rule_type=NetworkRuleType.IPV4,
+            comment=f"Used by {user_part} - {project_part} app - managed by snow-utils-networks",
+            force=force,
+        )
+        chunks.append(rule_sql)
 
     policy_sql = get_network_policy_sql(
         policy_name=policy_name,
-        rule_refs=[rule_fqn],
+        rule_refs=policy_refs,
         comment=f"Used by {user_part} - {project_part} app - managed by snow-utils-networks",
         force=force,
     )
+    chunks.append(policy_sql)
 
-    return f"USE ROLE {admin_role};\n{rule_sql}\n\n{policy_sql}"
+    return "\n\n".join(chunks)
 
 
 def setup_network_for_user(
@@ -215,28 +256,52 @@ def setup_network_for_user(
     force: bool = False,
     comment_prefix: str | None = None,
     admin_role: str = "accountadmin",
-) -> tuple[str, str]:
-    """Create network rule and policy for a user (idempotent)."""
+    allow_managed_github: bool = False,
+) -> tuple[str | None, str]:
+    """Create network rule and policy for a user (idempotent).
+
+    When ``allow_managed_github`` is True, the policy also references
+    ``SNOWFLAKE.NETWORK_SECURITY.GITHUB_ACTIONS``. If ``cidrs`` is empty,
+    only the managed GitHub rule is referenced (no custom network rule).
+    """
     rule_name = f"{user}_NETWORK_RULE".upper()
     policy_name = f"{user}_NETWORK_POLICY".upper()
     ctx = comment_prefix or user.upper()
 
-    rule_fqn = create_network_rule(
-        name=rule_name,
-        db=db,
-        schema=schema,
-        values=cidrs,
-        mode=NetworkRuleMode.INGRESS,
-        rule_type=NetworkRuleType.IPV4,
-        comment=f"{ctx} network rule - managed by snow-utils-pat",
-        dry_run=dry_run,
-        force=force,
-        admin_role=admin_role,
+    custom_fqn = f"{db.upper()}.{schema.upper()}.{rule_name}"
+    policy_refs = build_hybrid_policy_rule_refs(
+        custom_rule_fqn=custom_fqn if cidrs else None,
+        include_managed_github=allow_managed_github,
     )
+    if not policy_refs:
+        raise click.ClickException(
+            "Network policy requires at least one allowed rule "
+            "(enable --allow-local, --allow-google, --extra-cidrs, and/or --allow-gh)."
+        )
+
+    rule_fqn: str | None = None
+    if cidrs:
+        rule_fqn = create_network_rule(
+            name=rule_name,
+            db=db,
+            schema=schema,
+            values=cidrs,
+            mode=NetworkRuleMode.INGRESS,
+            rule_type=NetworkRuleType.IPV4,
+            comment=f"{ctx} network rule - managed by snow-utils-pat",
+            dry_run=dry_run,
+            force=force,
+            admin_role=admin_role,
+            policy_rule_refs=policy_refs,
+        )
+        policy_refs = build_hybrid_policy_rule_refs(
+            custom_rule_fqn=rule_fqn,
+            include_managed_github=allow_managed_github,
+        )
 
     create_network_policy(
         policy_name=policy_name,
-        rule_refs=[rule_fqn],
+        rule_refs=policy_refs,
         comment=f"{ctx} network policy - managed by snow-utils-pat",
         dry_run=dry_run,
         force=force,
