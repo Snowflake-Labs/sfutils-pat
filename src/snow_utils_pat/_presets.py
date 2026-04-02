@@ -11,7 +11,7 @@ package is fully self-contained.
 # Snowflake-managed ingress rule for GitHub Actions (hybrid policy). Confirm in-account with:
 # SHOW NETWORK RULES IN SNOWFLAKE.NETWORK_SECURITY;
 # See https://docs.snowflake.com/en/user-guide/network-rules.html#snowflake-managed-network-rules
-SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN = "SNOWFLAKE.NETWORK_SECURITY.GITHUB_ACTIONS"
+SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN = "SNOWFLAKE.NETWORK_SECURITY.GITHUBACTIONS_GLOBAL"
 
 from enum import Enum
 from functools import lru_cache
