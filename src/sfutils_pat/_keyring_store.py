@@ -7,21 +7,28 @@ from __future__ import annotations
 import keyring
 import keyring.errors
 
-DRIVER_LABEL = "SNOW-UTILS-PAT"
+DRIVER_LABEL = "SFUTILS-PAT"
+LEGACY_DRIVER_LABEL = "SNOW-UTILS-PAT"
 MISSING_HOST_SENTINEL = "NA"
 
 
 def build_pat_credential_service(
-    host: str | None, account: str, sa_user: str, pat_name: str
+    host: str | None,
+    account: str,
+    sa_user: str,
+    pat_name: str,
+    *,
+    driver_label: str | None = None,
 ) -> str:
-    """Build keyring *service* string: HOST:ACCOUNT:USER:SNOW-UTILS-PAT:PAT_NAME (upper)."""
+    """Build keyring *service* string: HOST:ACCOUNT:USER:<DRIVER>:PAT_NAME (upper)."""
+    label = driver_label or DRIVER_LABEL
     host_part = (host or "").strip().upper() or MISSING_HOST_SENTINEL
     return ":".join(
         [
             host_part,
             account.strip().upper(),
             sa_user.strip().upper(),
-            DRIVER_LABEL,
+            label,
             pat_name.strip().upper(),
         ]
     )
@@ -46,20 +53,29 @@ def store_pat(
 
 
 def load_pat(host: str | None, account: str, sa_user: str, pat_name: str) -> str | None:
-    service = build_pat_credential_service(host, account, sa_user, pat_name)
     user = keyring_username(sa_user)
-    try:
-        return keyring.get_password(service, user)
-    except keyring.errors.KeyringError:
-        return None
+    for drv in (DRIVER_LABEL, LEGACY_DRIVER_LABEL):
+        service = build_pat_credential_service(
+            host, account, sa_user, pat_name, driver_label=drv
+        )
+        try:
+            pw = keyring.get_password(service, user)
+        except keyring.errors.KeyringError:
+            pw = None
+        if pw:
+            return pw
+    return None
 
 
 def delete_pat(host: str | None, account: str, sa_user: str, pat_name: str) -> None:
-    service = build_pat_credential_service(host, account, sa_user, pat_name)
     user = keyring_username(sa_user)
-    try:
-        keyring.delete_password(service, user)
-    except keyring.errors.PasswordDeleteError:
-        pass
-    except keyring.errors.KeyringError:
-        pass
+    for drv in (DRIVER_LABEL, LEGACY_DRIVER_LABEL):
+        service = build_pat_credential_service(
+            host, account, sa_user, pat_name, driver_label=drv
+        )
+        try:
+            keyring.delete_password(service, user)
+        except keyring.errors.PasswordDeleteError:
+            pass
+        except keyring.errors.KeyringError:
+            pass

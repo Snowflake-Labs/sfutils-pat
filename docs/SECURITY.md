@@ -1,4 +1,4 @@
-# Security and compliance notes (snow-utils-pat)
+# Security and compliance notes (sfutils-pat)
 
 This document summarizes **security principles implemented in this repository**, **residual risks**, and a **high-level assessment** for security reviewers. It is not a formal certification, penetration-test report, or legal attestation.
 
@@ -22,36 +22,36 @@ This document summarizes **security principles implemented in this repository**,
 ### 1. Secrets minimization and storage
 
 - **PAT is not persisted in repo files.** The tool does not commit or require PATs in source control.
-- **PAT is not written to `.env` for normal auth.** Legacy `SA_PAT`-style lines are **stripped** when `.env` is rewritten; see [`pat.py`](../src/snow_utils_pat/pat.py) (`_strip_obsolete_dotenv_pat_lines`, `clear_env`).
-- **OS keyring is the primary secret store** for PAT material, with a **deterministic service string** derived from host, account, user, and PAT name ([`_keyring_store.py`](../src/snow_utils_pat/_keyring_store.py)). This matches the intent of connector-style credential separation.
+- **PAT is not written to `.env` for normal auth.** Legacy `SA_PAT`-style lines are **stripped** when `.env` is rewritten; see [`pat.py`](../src/sfutils_pat/pat.py) (`_strip_obsolete_dotenv_pat_lines`, `clear_env`).
+- **OS keyring is the primary secret store** for PAT material, with a **deterministic service string** derived from host, account, user, and PAT name ([`_keyring_store.py`](../src/sfutils_pat/_keyring_store.py)). This matches the intent of connector-style credential separation.
 
 ### 2. Safe-by-default CLI output
 
-- **`create` / `rotate` JSON output** includes `pat: "***REDACTED***"` rather than the raw token ([`pat.py`](../src/snow_utils_pat/pat.py)).
+- **`create` / `rotate` JSON output** includes `pat: "***REDACTED***"` rather than the raw token ([`pat.py`](../src/sfutils_pat/pat.py)).
 - **`--print` cannot be combined with `-o json`** to avoid structured logs accidentally capturing the secret.
 - **Dry-run** can print SQL; PAT generation SQL does not embed the secret (token comes from Snowflake’s response at execution time).
 
 ### 3. Dangerous operations are explicit and gated
 
-- **`show-pat`** prints the raw PAT to stdout only after an **interactive warning** (unless `--yes`), with stderr warnings about history and logs ([`pat.py`](../src/snow_utils_pat/pat.py)).
+- **`show-pat`** prints the raw PAT to stdout only after an **interactive warning** (unless `--yes`), with stderr warnings about history and logs ([`pat.py`](../src/sfutils_pat/pat.py)).
 - **`--print`** on `create`/`rotate` is documented as insecure and prints to stdout with a warning.
 - **`remove`** requires **`--yes` in non-interactive environments** to avoid accidental scripted destruction without acknowledgment.
 
 ### 4. Snowflake security controls (design intent)
 
 - **Service user** + **dedicated role** for PAT **role restriction** (least privilege is configured by the operator when choosing the role’s grants).
-- **Authentication policy** restricts the user to **programmatic access token** usage with **network policy evaluation** enforced for PATs ([`get_auth_policy_sql`](../src/snow_utils_pat/pat.py)).
-- **Network policy** with **ingress** rules; optional **`--allow-gh`** uses a **hybrid** policy referencing **Snowflake-managed** `SNOWFLAKE.NETWORK_SECURITY` rules where applicable ([`_network_helpers.py`](../src/snow_utils_pat/_network_helpers.py), [`_presets.py`](../src/snow_utils_pat/_presets.py)).
-- **`remove` does not drop** Snowflake-managed rules under `SNOWFLAKE.NETWORK_SECURITY`; it drops **your** account policy and **`{db}.NETWORKS.{user}`** rule only ([`cleanup_network_for_user`](../src/snow_utils_pat/_network_helpers.py)).
+- **Authentication policy** restricts the user to **programmatic access token** usage with **network policy evaluation** enforced for PATs ([`get_auth_policy_sql`](../src/sfutils_pat/pat.py)).
+- **Network policy** with **ingress** rules; optional **`--allow-gh`** uses a **hybrid** policy referencing **Snowflake-managed** `SNOWFLAKE.NETWORK_SECURITY` rules where applicable ([`_network_helpers.py`](../src/sfutils_pat/_network_helpers.py), [`_presets.py`](../src/sfutils_pat/_presets.py)).
+- **`remove` does not drop** Snowflake-managed rules under `SNOWFLAKE.NETWORK_SECURITY`; it drops **your** account policy and **`{db}.NETWORKS.{user}`** rule only ([`cleanup_network_for_user`](../src/sfutils_pat/_network_helpers.py)).
 
 ### 5. Process and subprocess boundaries
 
-- SQL and connection operations are delegated to the **`snow` CLI** via `subprocess` with argument lists (no shell interpolation in those wrappers) ([`_snow.py`](../src/snow_utils_pat/_snow.py)).
-- **Verification** uses **`snowflake-connector-python`** with **`authenticator='PROGRAMMATIC_ACCESS_TOKEN'`** and the PAT as **`token`** ([`_verify_pat_connector`](../src/snow_utils_pat/_verify_pat_connector.py), [`verify_connection`](../src/snow_utils_pat/pat.py)). The PAT is **not** passed to a `snow` subprocess via **`SNOWFLAKE_PASSWORD`**. Same-user process visibility and host security policies still apply to the Python process.
+- SQL and connection operations are delegated to the **`snow` CLI** via `subprocess` with argument lists (no shell interpolation in those wrappers) ([`_snow.py`](../src/sfutils_pat/_snow.py)).
+- **Verification** uses **`snowflake-connector-python`** with **`authenticator='PROGRAMMATIC_ACCESS_TOKEN'`** and the PAT as **`token`** ([`_verify_pat_connector`](../src/sfutils_pat/_verify_pat_connector.py), [`verify_connection`](../src/sfutils_pat/pat.py)). The PAT is **not** passed to a `snow` subprocess via **`SNOWFLAKE_PASSWORD`**. Same-user process visibility and host security policies still apply to the Python process.
 
 ### 6. Optional masking for CLI tooling
 
-- Snow output masking helpers exist for **non-PAT** sensitive patterns (e.g. IPs, AWS account IDs) when enabled ([`_snow.py`](../src/snow_utils_pat/_snow.py)). PAT masking is handled by **not emitting** the PAT in JSON success paths.
+- Snow output masking helpers exist for **non-PAT** sensitive patterns (e.g. IPs, AWS account IDs) when enabled ([`_snow.py`](../src/sfutils_pat/_snow.py)). PAT masking is handled by **not emitting** the PAT in JSON success paths.
 
 ### 7. Configuration hygiene
 

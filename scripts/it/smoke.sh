@@ -2,11 +2,11 @@
 # Minimal integration smoke: Snowflake CLI JSON + PAT create dry-runs (no DDL) +
 # keyring store/load/delete of a dummy secret (same service-string layout as real PATs).
 # Requires: snow CLI, uv, repo synced. See docs/it/README.md.
-# May prompt for OS keychain access once; uses isolated identity SNOW_UTILS_PAT_IT_SMOKE only.
+# May prompt for OS keychain access once; uses isolated identity SF_UTILS_PAT_IT_SMOKE only.
 #
 # Loads .env from repo root when present (same idea as Taskfile dotenv).
-# Dry-run user/role/db resolution (first match wins): SNOW_UTILS_PAT_* → SA_USER/SA_ROLE/SNOW_UTILS_DB
-# → IT_* → slug from snow connection test User. Slug fallback is dry-run-only.
+# Dry-run user/role/db resolution (first match wins): SF_UTILS_PAT_* → SA_USER/SA_ROLE/SF_UTILS_DB
+# (legacy SNOW_UTILS_DB / IT_SNOW_UTILS_DB) → IT_* → slug from snow connection test User. Slug fallback is dry-run-only.
 
 set -euo pipefail
 
@@ -40,30 +40,30 @@ print(base)
 "
 )"
 
-_DRY_SA_USER="${SNOW_UTILS_PAT_SA_USER:-${SA_USER:-${IT_SA_USER:-${_IT_SLUG}_RUNNER}}}"
-_DRY_SA_ROLE="${SNOW_UTILS_PAT_SA_ROLE:-${SA_ROLE:-${IT_SA_ROLE:-${_IT_SLUG}_ACCESS}}}"
-_DRY_SNOW_UTILS_DB="${SNOW_UTILS_PAT_SNOW_UTILS_DB:-${SNOW_UTILS_DB:-${IT_SNOW_UTILS_DB:-${_IT_SLUG}_UTILS}}}"
+_DRY_SA_USER="${SF_UTILS_PAT_SA_USER:-${SA_USER:-${IT_SA_USER:-${_IT_SLUG}_RUNNER}}}"
+_DRY_SA_ROLE="${SF_UTILS_PAT_SA_ROLE:-${SA_ROLE:-${IT_SA_ROLE:-${_IT_SLUG}_ACCESS}}}"
+_DRY_SF_UTILS_DB="${SF_UTILS_PAT_SF_UTILS_DB:-${SF_UTILS_DB:-${SNOW_UTILS_DB:-${IT_SF_UTILS_DB:-${IT_SNOW_UTILS_DB:-${_IT_SLUG}_UTILS}}}}}"
 
-echo "== Effective dry-run identifiers (SNOW_UTILS_PAT_* > SA_* / SNOW_UTILS_DB > IT_* > slug) =="
+echo "== Effective dry-run identifiers (SF_UTILS_PAT_* > SA_* / SF_UTILS_DB > legacy SNOW_UTILS_DB > IT_* > slug) =="
 echo "  SA_USER (dry-run)=$_DRY_SA_USER"
 echo "  SA_ROLE (dry-run)=$_DRY_SA_ROLE"
-echo "  SNOW_UTILS_DB (dry-run)=$_DRY_SNOW_UTILS_DB"
+echo "  SF_UTILS_DB (dry-run)=$_DRY_SF_UTILS_DB"
 echo
 
-echo "== snow-utils-pat create --dry-run --skip-network =="
-uv run snow-utils-pat create \
+echo "== sfutils-pat create --dry-run --skip-network =="
+uv run sfutils-pat create \
   --user "$_DRY_SA_USER" \
   --role "$_DRY_SA_ROLE" \
-  --db "$_DRY_SNOW_UTILS_DB" \
+  --db "$_DRY_SF_UTILS_DB" \
   --dry-run \
   --skip-network
 
 echo
-echo "== snow-utils-pat create --dry-run --no-local --allow-gh (hybrid policy SQL; no DDL, no IP discovery) =="
-uv run snow-utils-pat create \
+echo "== sfutils-pat create --dry-run --no-local --allow-gh (hybrid policy SQL; no DDL, no IP discovery) =="
+uv run sfutils-pat create \
   --user "$_DRY_SA_USER" \
   --role "$_DRY_SA_ROLE" \
-  --db "$_DRY_SNOW_UTILS_DB" \
+  --db "$_DRY_SF_UTILS_DB" \
   --dry-run \
   --no-local \
   --allow-gh
@@ -74,7 +74,7 @@ printf '%s' "$CONN_JSON" | uv run python -c "
 import json
 import sys
 
-from snow_utils_pat._keyring_store import delete_pat, load_pat, store_pat
+from sfutils_pat._keyring_store import delete_pat, load_pat, store_pat
 
 d = json.load(sys.stdin)
 account = d.get('Account') or d.get('account')
@@ -86,9 +86,9 @@ host = (
     or d.get('SnowflakeHost')
     or d.get('snowflake_host')
 )
-sa_user = 'SNOW_UTILS_PAT_IT_SMOKE'
-pat_name = 'SNOW_UTILS_PAT_IT_SMOKE'
-secret = 'snow-utils-pat-it-smoke-dummy-not-a-real-pat'
+sa_user = 'SF_UTILS_PAT_IT_SMOKE'
+pat_name = 'SF_UTILS_PAT_IT_SMOKE'
+secret = 'sfutils-pat-it-smoke-dummy-not-a-real-pat'
 try:
     store_pat(host, account, sa_user, pat_name, secret)
     got = load_pat(host, account, sa_user, pat_name)

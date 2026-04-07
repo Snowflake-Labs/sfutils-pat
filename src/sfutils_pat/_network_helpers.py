@@ -1,7 +1,7 @@
 """
 Network rule and policy helpers for PAT user setup.
 
-Inlined from snow-utils-networks so snow-utils-pat is fully self-contained.
+Inlined from sfutils-networks so sfutils-pat is fully self-contained.
 These functions handle creating, assigning, and cleaning up network rules
 and policies that are scoped to individual service users.
 """
@@ -10,14 +10,14 @@ import re
 
 import click
 
-from snow_utils_pat._presets import (
+from sfutils_pat._presets import (
     SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN,
     NetworkRuleMode,
     NetworkRuleType,
     get_valid_types_for_mode,
     validate_mode_type,
 )
-from snow_utils_pat._snow import run_snow_sql, run_snow_sql_stdin
+from sfutils_pat._snow import run_snow_sql, run_snow_sql_stdin
 
 
 def normalize_identifier(name: str, style: str = "snowflake") -> str:
@@ -45,7 +45,7 @@ def get_network_rule_sql(
 ) -> str:
     """Generate SQL for creating a network rule."""
     value_list = ", ".join(f"'{v}'" for v in values)
-    comment_text = comment or "Created by snow-utils"
+    comment_text = comment or "Created by sfutils"
     return f"""CREATE OR REPLACE NETWORK RULE {db}.{schema}.{name}
     MODE = {mode.value}
     TYPE = {rule_type.value}
@@ -61,7 +61,7 @@ def get_network_policy_sql(
 ) -> str:
     """Generate SQL for creating a network policy."""
     rule_list = ", ".join(rule_refs)
-    comment_text = comment or "Created by snow-utils"
+    comment_text = comment or "Created by sfutils"
     return f"""CREATE NETWORK POLICY IF NOT EXISTS {policy_name}
     ALLOWED_NETWORK_RULE_LIST = ({rule_list})
     COMMENT = '{comment_text}';"""
@@ -231,7 +231,7 @@ def get_setup_network_for_user_sql(
             values=cidrs,
             mode=NetworkRuleMode.INGRESS,
             rule_type=NetworkRuleType.IPV4,
-            comment=f"Used by {user_part} - {project_part} app - managed by snow-utils-networks",
+            comment=f"Used by {user_part} - {project_part} app - managed by sf-utils-networks",
             force=force,
         )
         chunks.append(rule_sql)
@@ -239,7 +239,7 @@ def get_setup_network_for_user_sql(
     policy_sql = get_network_policy_sql(
         policy_name=policy_name,
         rule_refs=policy_refs,
-        comment=f"Used by {user_part} - {project_part} app - managed by snow-utils-networks",
+        comment=f"Used by {user_part} - {project_part} app - managed by sf-utils-networks",
         force=force,
     )
     chunks.append(policy_sql)
@@ -288,7 +288,7 @@ def setup_network_for_user(
             values=cidrs,
             mode=NetworkRuleMode.INGRESS,
             rule_type=NetworkRuleType.IPV4,
-            comment=f"{ctx} network rule - managed by snow-utils-pat",
+            comment=f"{ctx} network rule - managed by sfutils-pat",
             dry_run=dry_run,
             force=force,
             admin_role=admin_role,
@@ -302,7 +302,7 @@ def setup_network_for_user(
     create_network_policy(
         policy_name=policy_name,
         rule_refs=policy_refs,
-        comment=f"{ctx} network policy - managed by snow-utils-pat",
+        comment=f"{ctx} network policy - managed by sfutils-pat",
         dry_run=dry_run,
         force=force,
         admin_role=admin_role,

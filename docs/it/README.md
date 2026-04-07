@@ -1,4 +1,4 @@
-# Integration tests (snow-utils-pat)
+# Integration tests (sfutils-pat)
 
 These checks exercise the **Snowflake CLI** (`snow`), and optionally the **real OS keychain** via Python `keyring`. They are **opt-in** and should use a **non-production** Snowflake account.
 
@@ -14,7 +14,7 @@ These checks exercise the **Snowflake CLI** (`snow`), and optionally the **real 
 
 - [Snowflake CLI](https://docs.snowflake.com/developer-guide/snowflake-cli/index) installed; default connection configured (`SNOWFLAKE_DEFAULT_CONNECTION_NAME` or your usual `snow` profile).
 - Admin-capable role for full lifecycle (often `ACCOUNTADMIN` or equivalent) to create users, roles, network rules/policies, authentication policies, and PATs.
-- A dedicated database for policy objects (e.g. `MY_SNOW_UTILS`) already created in the account.
+- A dedicated database for policy objects (e.g. `MY_SF_UTILS`) already created in the account.
 - **Network policy:** the runner’s egress IP must be allowed. For local runs, `--allow-local` (default on `create`) includes your detected public CIDR; add `--extra-cidrs` as needed. `--allow-gh` adds Snowflake’s managed GitHub Actions rule to the policy (hybrid with your custom rule); requires [Snowflake-managed network rules](https://docs.snowflake.com/en/user-guide/network-rules.html#snowflake-managed-network-rules) in the account (not gov regions).
 - **Keychain:** first access may prompt for OS keychain permission; unattended runners need a non-interactive keyring backend or prior approval.
 - **PAT limit:** Snowflake allows up to **15 active PATs per user**. Rotate/remove test users so you do not hit the limit during repeated IT runs.
@@ -25,27 +25,27 @@ These checks exercise the **Snowflake CLI** (`snow`), and optionally the **real 
 
 ## Manual IT: use the same `.env` as the CLI
 
-The `snow-utils-pat` commands read **`SA_USER`**, **`SA_ROLE`**, and **`SNOW_UTILS_DB`** from the process environment (same as `--user` / `--role` / `--db`). For manual scenarios **3–6**, **prefer the project `.env`** (or a dedicated file such as `.env.it`) so you do not maintain a second variable family.
+The `sfutils-pat` commands read **`SA_USER`**, **`SA_ROLE`**, and **`SF_UTILS_DB`** from the process environment (same as `--user` / `--role` / `--db`; legacy **`SNOW_UTILS_DB`** is still accepted). For manual scenarios **3–6**, **prefer the project `.env`** (or a dedicated file such as `.env.it`) so you do not maintain a second variable family.
 
-**Safety:** Point `SA_USER` / `SA_ROLE` / `SNOW_UTILS_DB` at **disposable** resources in a **non-production** account—not production service users.
+**Safety:** Point `SA_USER` / `SA_ROLE` / `SF_UTILS_DB` at **disposable** resources in a **non-production** account—not production service users.
 
 Example workflow:
 
 ```bash
-cd /path/to/snow-utils-pat
+cd /path/to/sfutils-pat
 uv sync
 
 # Load vars (matches Taskfile dotenv behavior when you use task create, etc.)
 set -a && source .env && set +a
 # Or: set -a && source .env.it && set +a
 
-uv run snow-utils-pat create --yes
-uv run snow-utils-pat verify
-uv run snow-utils-pat rotate
-uv run snow-utils-pat verify
-# uv run snow-utils-pat show-pat   # optional; confirms with warning, then prints secret (or --yes)
+uv run sfutils-pat create --yes
+uv run sfutils-pat verify
+uv run sfutils-pat rotate
+uv run sfutils-pat verify
+# uv run sfutils-pat show-pat   # optional; confirms with warning, then prints secret (or --yes)
 
-uv run snow-utils-pat remove --drop-user --yes
+uv run sfutils-pat remove --drop-user --yes
 ```
 
 Pass `--user` / `--role` / `--db` only when you need to override what is in the environment for a single invocation.
@@ -58,19 +58,19 @@ If you do **not** want to load `.env`, or need to override only for a script:
 
 | Variable | Purpose |
 |----------|---------|
-| `SNOW_UTILS_PAT_SA_USER` | Overrides `SA_USER` for [`scripts/it/smoke.sh`](../../scripts/it/smoke.sh) dry-run identifiers only |
-| `SNOW_UTILS_PAT_SA_ROLE` | Overrides `SA_ROLE` (same) |
-| `SNOW_UTILS_PAT_SNOW_UTILS_DB` | Overrides `SNOW_UTILS_DB` (same) |
+| `SF_UTILS_PAT_SA_USER` | Overrides `SA_USER` for [`scripts/it/smoke.sh`](../../scripts/it/smoke.sh) dry-run identifiers only |
+| `SF_UTILS_PAT_SA_ROLE` | Overrides `SA_ROLE` (same) |
+| `SF_UTILS_PAT_SF_UTILS_DB` | Overrides `SF_UTILS_DB` / legacy `SNOW_UTILS_DB` (same) |
 
-**Legacy:** `IT_SA_USER`, `IT_SA_ROLE`, `IT_SNOW_UTILS_DB` are still honored in `smoke.sh` after the above.
+**Legacy:** `IT_SA_USER`, `IT_SA_ROLE`, `IT_SF_UTILS_DB`, and `IT_SNOW_UTILS_DB` are still honored in `smoke.sh` after the above.
 
-These `SNOW_UTILS_PAT_*` names avoid colliding with **`SNOWFLAKE_*`** vars used by the Snowflake CLI; they are **not** required for normal manual IT when using `.env`.
+These `SF_UTILS_PAT_*` names avoid colliding with **`SNOWFLAKE_*`** vars used by the Snowflake CLI; they are **not** required for normal manual IT when using `.env`.
 
 ### What `snow connection test --format json` provides
 
 The JSON includes your **current session** fields (e.g. `User`, `Account`, `Host` depending on CLI version). It does **not** define the PAT service user, role, or utils database—those come from **`.env` / env** (or smoke’s slug fallback when nothing is set).
 
-[`scripts/it/smoke.sh`](../../scripts/it/smoke.sh) loads `.env` from the repo root when present (`set -a` / `source` / `set +a`, same idea as Task’s `dotenv`). It resolves dry-run **user / role / db** in this order: **`SNOW_UTILS_PAT_*` → `SA_USER` / `SA_ROLE` / `SNOW_UTILS_DB` → `IT_*` → slug from connection `User`**. The slug fallback is only suitable for **dry-run**; for a real `create`, **`SNOW_UTILS_DB` in `.env` must name an existing database**.
+[`scripts/it/smoke.sh`](../../scripts/it/smoke.sh) loads `.env` from the repo root when present (`set -a` / `source` / `set +a`, same idea as Task’s `dotenv`). It resolves dry-run **user / role / db** in this order: **`SF_UTILS_PAT_*` → `SA_USER` / `SA_ROLE` / `SF_UTILS_DB` (legacy `SNOW_UTILS_DB`) → `IT_*` → slug from connection `User`**. The slug fallback is only suitable for **dry-run**; for a real `create`, **`SF_UTILS_DB` in `.env` must name an existing database**.
 
 ## Naming (avoid collisions)
 
@@ -80,7 +80,7 @@ Use a unique prefix per engineer or CI run for `SA_USER` / related objects in th
 
 | # | Scenario | Command / action | Risk |
 |---|----------|------------------|------|
-| 1 | `create` dry-run (no Snowflake DDL) | With env loaded: `snow-utils-pat create --dry-run --skip-network` (or explicit `--user` / `--role` / `--db`) | None for `--skip-network` path |
+| 1 | `create` dry-run (no Snowflake DDL) | With env loaded: `sfutils-pat create --dry-run --skip-network` (or explicit `--user` / `--role` / `--db`) | None for `--skip-network` path |
 | 2 | Connection metadata (read-only) | `snow connection test --format json` | Read-only |
 | 3 | Full `create` → `verify` | Env from `.env`: `create --yes` then `verify` | Creates objects + PAT; **OS keyring** |
 | 4 | `rotate` → `verify` | `rotate` then `verify` | New PAT secret |
@@ -110,8 +110,8 @@ See [scripts/it/smoke.sh](../../scripts/it/smoke.sh) and `task it-smoke` in the 
 
 1. Optionally sources **`.env`** in the repo root when the file exists.
 2. Runs `snow connection test --format json`.
-3. Runs `snow-utils-pat create --dry-run --skip-network` using resolved user/role/db (precedence above).
-4. Runs `snow-utils-pat create --dry-run --no-local --allow-gh` to print **hybrid** network policy SQL (Snowflake-managed GitHub rule only in the allow list; still no DDL).
-5. **Keyring roundtrip:** stores a **dummy** secret via `store_pat` / `load_pat` / `delete_pat` using the same service-string layout as real PATs, with fixed identity `SNOW_UTILS_PAT_IT_SMOKE` (does not overlap normal SA user names). Your OS may prompt for keychain access.
+3. Runs `sfutils-pat create --dry-run --skip-network` using resolved user/role/db (precedence above).
+4. Runs `sfutils-pat create --dry-run --no-local --allow-gh` to print **hybrid** network policy SQL (Snowflake-managed GitHub rule only in the allow list; still no DDL).
+5. **Keyring roundtrip:** stores a **dummy** secret via `store_pat` / `load_pat` / `delete_pat` using the same service-string layout as real PATs, with fixed identity `SF_UTILS_PAT_IT_SMOKE` (does not overlap normal SA user names). Your OS may prompt for keychain access.
 
 Step 5 validates the local keyring backend without creating Snowflake objects or real PATs.

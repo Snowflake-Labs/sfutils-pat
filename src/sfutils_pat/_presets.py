@@ -1,11 +1,11 @@
 """
-IPv4 preset providers for snow-utils-pat.
+IPv4 preset providers for sfutils-pat.
 
 Provides IPv4 CIDR collection from presets (local IP, Google, extra CIDRs) for
 the custom network rule. GitHub Actions ingress uses Snowflake-managed rules
 (see SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN) referenced from the network
-policy, not GitHub meta API lists. Copied from snow-utils-common so this
-package is fully self-contained.
+policy, not GitHub meta API lists. Originally aligned with shared sfutils
+patterns; this package is fully self-contained.
 """
 
 # Snowflake-managed ingress rule for GitHub Actions (hybrid policy). Confirm in-account with:
@@ -66,7 +66,7 @@ def _is_ipv4_cidr(cidr: str) -> bool:
 def get_github_actions_ips() -> tuple[str, ...]:
     """Fetch GitHub Actions runner IPv4 CIDRs from GitHub meta API (legacy / optional tooling).
 
-    ``snow-utils-pat create --allow-gh`` uses SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN instead.
+    ``sfutils-pat create --allow-gh`` uses SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN instead.
     """
     response = requests.get("https://api.github.com/meta", timeout=30)
     response.raise_for_status()

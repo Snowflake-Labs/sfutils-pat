@@ -24,29 +24,29 @@ For running tests: `uv sync --extra dev`
 
 ```bash
 # Create PAT with local IP network policy (most secure)
-snow-utils-pat create --user my_sa --role demo_role --db my_db
+sfutils-pat create --user my_sa --role demo_role --db my_db
 
 # Allow GitHub Actions (hybrid policy: custom CIDRs + Snowflake-managed rule; see Network Policy)
-snow-utils-pat create --user ci_sa --role ci_role --db my_db --allow-gh
+sfutils-pat create --user ci_sa --role ci_role --db my_db --allow-gh
 
-# Skip network setup (if managed separately by snow-utils-networks)
-snow-utils-pat create --user my_sa --role demo_role --db my_db --skip-network
+# Skip network setup (if managed separately by sfutils-networks)
+sfutils-pat create --user my_sa --role demo_role --db my_db --skip-network
 
 # Preview all SQL without executing
-snow-utils-pat create --user my_sa --role demo_role --db my_db --dry-run
+sfutils-pat create --user my_sa --role demo_role --db my_db --dry-run
 
 # Rotate an existing PAT (keeps all policies)
-snow-utils-pat rotate --user my_sa --role demo_role
+sfutils-pat rotate --user my_sa --role demo_role
 
 # Verify PAT works (loads token from keyring only)
-snow-utils-pat verify --user my_sa --role demo_role
+sfutils-pat verify --user my_sa --role demo_role
 
 # Print PAT to stdout once (insecure; appears in logs) — optional
-snow-utils-pat create --user my_sa --role demo_role --db my_db --print
+sfutils-pat create --user my_sa --role demo_role --db my_db --print
 
 # Remove PAT and all associated objects (per-step prompts; use --yes to skip)
-snow-utils-pat remove --user my_sa --db my_db
-snow-utils-pat remove --user my_sa --db my_db --yes
+sfutils-pat remove --user my_sa --db my_db
+sfutils-pat remove --user my_sa --db my_db --yes
 ```
 
 ## Keyring layout
@@ -54,8 +54,8 @@ snow-utils-pat remove --user my_sa --db my_db --yes
 The PAT is stored with:
 
 - **`keyring` service (first argument):**  
-  `{HOST}:{ACCOUNT}:{SA_USER}:SNOW-UTILS-PAT:{PAT_NAME}`  
-  All segments are uppercased. `HOST` comes from `snow connection test --format json` when present; otherwise the first segment is `NA`. `ACCOUNT` is the connection account identifier from the same JSON.
+  `{HOST}:{ACCOUNT}:{SA_USER}:SFUTILS-PAT:{PAT_NAME}`  
+  All segments are uppercased. `HOST` comes from `snow connection test --format json` when present; otherwise the first segment is `NA`. `ACCOUNT` is the connection account identifier from the same JSON. **Legacy installs** may still have secrets under `SNOW-UTILS-PAT`; the CLI reads that label as a fallback and deletes both on `remove`.
 - **`keyring` username (second argument):** `SA_USER` uppercased (same pattern as the Snowflake Python connector for cached tokens).
 
 The same tuple is used for `create`, `rotate`, `verify`, `show-pat`, and keyring cleanup on `remove`.
@@ -83,15 +83,15 @@ JSON output (`-o json`) never includes the raw token; it includes redaction and 
 ## Task Workflow
 
 ```bash
-task create SA_USER=my_sa SA_ROLE=demo_role SNOW_UTILS_DB=my_db
-task create SA_USER=ci_sa SA_ROLE=ci_role SNOW_UTILS_DB=my_db -- --allow-gh
-task no-rotate SA_USER=my_sa SA_ROLE=demo_role SNOW_UTILS_DB=my_db
-task remove SA_USER=my_sa SNOW_UTILS_DB=my_db
+task create SA_USER=my_sa SA_ROLE=demo_role SF_UTILS_DB=my_db
+task create SA_USER=ci_sa SA_ROLE=ci_role SF_UTILS_DB=my_db -- --allow-gh
+task no-rotate SA_USER=my_sa SA_ROLE=demo_role SF_UTILS_DB=my_db
+task remove SA_USER=my_sa SF_UTILS_DB=my_db
 ```
 
 ## Integration testing
 
-Opt-in checks against a real Snowflake account and the OS keychain are documented in [docs/it/README.md](docs/it/README.md). `task it` runs unit tests (`pytest`) then shell smoke (`scripts/it/smoke.sh`). For **manual** full lifecycle IT, use the same **`.env`** keys as daily CLI use (`SA_USER`, `SA_ROLE`, `SNOW_UTILS_DB`); see the runbook.
+Opt-in checks against a real Snowflake account and the OS keychain are documented in [docs/it/README.md](docs/it/README.md). `task it` runs unit tests (`pytest`) then shell smoke (`scripts/it/smoke.sh`). For **manual** full lifecycle IT, use the same **`.env`** keys as daily CLI use (`SA_USER`, `SA_ROLE`, `SF_UTILS_DB`; legacy `SNOW_UTILS_DB` is still accepted); see the runbook.
 
 ## CLI Commands
 
@@ -110,7 +110,7 @@ Opt-in checks against a real Snowflake account and the OS keychain are documente
 | `SA_USER` | Service account username |
 | `SA_ROLE` | Role restriction for the PAT |
 | `SA_ADMIN_ROLE` | Admin role for creating policies (default: `ACCOUNTADMIN`) |
-| `SNOW_UTILS_DB` | Database for PAT objects (network rules, auth policies) |
+| `SF_UTILS_DB` | Database for PAT objects (network rules, auth policies); legacy `SNOW_UTILS_DB` still read by CLI and `check-setup` |
 | `PAT_NAME` | Snowflake PAT object name (default: `{USER}_PAT`) |
 | `DOT_ENV_FILE` | Used by Taskfile examples; CLI uses `--env-path` / `--dot-env-file` |
 
@@ -133,11 +133,15 @@ PATs require a network policy for security (Snowflake best practice). By default
 - With `--allow-gh` and no custom CIDRs (e.g. `--no-local --allow-gh` only), the policy may reference **only** the managed GitHub rule—no custom network rule is created.
 - Assigns the policy to the service user.
 
-Use `--skip-network` if you manage network rules separately with `snow-utils-networks`.
+Use `--skip-network` if you manage network rules separately with `sfutils-networks` (or the **sf-utils-networks** Cortex skill).
 
 ## Security
 
 For security principles, residual risks, and an informal compliance-oriented review, see [docs/SECURITY.md](docs/SECURITY.md).
+
+## Related
+
+- [sf-utils-skills](https://github.com/Snowflake-Labs/sf-utils-skills) (Cortex Code skills; use path `sf-utils-pat` after repo rename from `snow-utils-skills`)
 
 ## License
 

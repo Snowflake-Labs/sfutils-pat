@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import click
 import pytest
 
-from snow_utils_pat._verify_pat_connector import verify_pat_with_connector
+from sfutils_pat._verify_pat_connector import verify_pat_with_connector
 
 
 @patch("snowflake.connector.connect")

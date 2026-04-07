@@ -10,14 +10,16 @@ import pytest
 from click.testing import CliRunner
 from keyring.backend import KeyringBackend
 
-from snow_utils_pat._keyring_store import (
+from sfutils_pat._keyring_store import (
+    LEGACY_DRIVER_LABEL,
     MISSING_HOST_SENTINEL,
     build_pat_credential_service,
     delete_pat,
+    keyring_username,
     load_pat,
     store_pat,
 )
-from snow_utils_pat.pat import cli
+from sfutils_pat.pat import cli
 
 
 class DictKeyring(KeyringBackend):
@@ -56,13 +58,13 @@ def test_build_pat_credential_service_normal():
     s = build_pat_credential_service(
         "abc.snowflakecomputing.com", "myorg-myacct", "svc_user", "SVC_USER_PAT"
     )
-    assert s == "ABC.SNOWFLAKECOMPUTING.COM:MYORG-MYACCT:SVC_USER:SNOW-UTILS-PAT:SVC_USER_PAT"
+    assert s == "ABC.SNOWFLAKECOMPUTING.COM:MYORG-MYACCT:SVC_USER:SFUTILS-PAT:SVC_USER_PAT"
 
 
 def test_build_pat_credential_service_missing_host_uses_sentinel():
     s = build_pat_credential_service(None, "acct", "u", "P1")
     assert s.startswith(f"{MISSING_HOST_SENTINEL}:")
-    assert ":ACCT:U:SNOW-UTILS-PAT:P1" in s
+    assert ":ACCT:U:SFUTILS-PAT:P1" in s
 
 
 def test_build_pat_different_accounts_differ():
@@ -76,6 +78,15 @@ def test_roundtrip_store_load_delete(isolated_keyring):
     assert load_pat("host.example", "acct", "user1", "PAT_A") == "secret-value"
     delete_pat("host.example", "acct", "user1", "PAT_A")
     assert load_pat("host.example", "acct", "user1", "PAT_A") is None
+
+
+def test_load_pat_falls_back_to_legacy_keyring_label(isolated_keyring):
+    user = keyring_username("user1")
+    legacy_svc = build_pat_credential_service(
+        "host.example", "acct", "user1", "PAT_A", driver_label=LEGACY_DRIVER_LABEL
+    )
+    keyring.set_password(legacy_svc, user, "legacy-secret")
+    assert load_pat("host.example", "acct", "user1", "PAT_A") == "legacy-secret"
 
 
 def test_delete_pat_idempotent(isolated_keyring):
@@ -111,9 +122,9 @@ def test_create_rejects_print_with_json():
     assert "print" in result.output.lower() and "json" in result.output.lower()
 
 
-@patch("snow_utils_pat.pat.load_pat", return_value=None)
+@patch("sfutils_pat.pat.load_pat", return_value=None)
 @patch(
-    "snow_utils_pat.pat.get_snowflake_connection_metadata",
+    "sfutils_pat.pat.get_snowflake_connection_metadata",
     return_value=("myacct", "host.snowflakecomputing.com"),
 )
 def test_verify_fails_when_keyring_empty(_meta, _load):
@@ -123,9 +134,9 @@ def test_verify_fails_when_keyring_empty(_meta, _load):
     assert "keyring" in result.output.lower()
 
 
-@patch("snow_utils_pat.pat.load_pat", return_value="PAT_SECRET_VALUE")
+@patch("sfutils_pat.pat.load_pat", return_value="PAT_SECRET_VALUE")
 @patch(
-    "snow_utils_pat.pat.get_snowflake_connection_metadata",
+    "sfutils_pat.pat.get_snowflake_connection_metadata",
     return_value=("myacct", "host.example.com"),
 )
 def test_show_pat_confirm_no_aborts(_meta, _load):
@@ -136,9 +147,9 @@ def test_show_pat_confirm_no_aborts(_meta, _load):
     assert "PAT_SECRET_VALUE" not in result.output
 
 
-@patch("snow_utils_pat.pat.load_pat", return_value="PAT_SECRET_VALUE")
+@patch("sfutils_pat.pat.load_pat", return_value="PAT_SECRET_VALUE")
 @patch(
-    "snow_utils_pat.pat.get_snowflake_connection_metadata",
+    "sfutils_pat.pat.get_snowflake_connection_metadata",
     return_value=("myacct", "host.example.com"),
 )
 def test_show_pat_confirm_yes_prints(_meta, _load):
@@ -149,9 +160,9 @@ def test_show_pat_confirm_yes_prints(_meta, _load):
     assert "WARNING" in result.output
 
 
-@patch("snow_utils_pat.pat.load_pat", return_value="PAT_SECRET_VALUE")
+@patch("sfutils_pat.pat.load_pat", return_value="PAT_SECRET_VALUE")
 @patch(
-    "snow_utils_pat.pat.get_snowflake_connection_metadata",
+    "sfutils_pat.pat.get_snowflake_connection_metadata",
     return_value=("myacct", "host.example.com"),
 )
 def test_show_pat_yes_skips_confirm(_meta, _load):

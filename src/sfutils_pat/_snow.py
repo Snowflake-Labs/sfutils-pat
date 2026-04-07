@@ -1,5 +1,5 @@
 """
-Vendored snow CLI utilities for snow-utils-pat.
+Vendored snow CLI utilities for sfutils-pat.
 
 Thin wrappers around the `snow` CLI for executing SQL, plus
 sensitive-value masking. Copied from snow-utils-common so this package

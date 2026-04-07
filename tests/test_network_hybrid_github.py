@@ -6,11 +6,11 @@ from __future__ import annotations
 import click
 import pytest
 
-from snow_utils_pat._network_helpers import (
+from sfutils_pat._network_helpers import (
     build_hybrid_policy_rule_refs,
     get_setup_network_for_user_sql,
 )
-from snow_utils_pat._presets import SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN
+from sfutils_pat._presets import SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN
 
 
 def test_build_hybrid_policy_rule_refs_github_only() -> None:

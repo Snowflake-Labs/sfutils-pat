@@ -31,30 +31,30 @@ from pathlib import Path
 import click
 from dotenv import load_dotenv
 
-from snow_utils_pat._keyring_store import (
+from sfutils_pat._keyring_store import (
     build_pat_credential_service,
     delete_pat,
     load_pat,
     store_pat,
 )
-from snow_utils_pat._network_helpers import (
+from sfutils_pat._network_helpers import (
     assign_network_policy_to_user,
     cleanup_network_for_user,
     get_setup_network_for_user_sql,
     setup_network_for_user,
 )
-from snow_utils_pat._presets import (
+from sfutils_pat._presets import (
     SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN,
     collect_ipv4_cidrs,
 )
-from snow_utils_pat._snow import (
+from sfutils_pat._snow import (
     get_snow_cli_options,
     run_snow_sql,
     run_snow_sql_stdin,
     set_masking,
     set_snow_cli_options,
 )
-from snow_utils_pat._verify_pat_connector import verify_pat_with_connector
+from sfutils_pat._verify_pat_connector import verify_pat_with_connector
 
 # Older layouts stored the raw PAT in .env; strip when rewriting .env (not used for auth).
 _LEGACY_DOTENV_RAW_PAT_KEY = "SA_PAT"
@@ -170,7 +170,7 @@ def infer_comment_prefix(user: str) -> str:
 
 
 def format_comment(comment_prefix: str, suffix: str = "") -> str:
-    """Format comment as 'Used by USER - PROJECT app - managed by snow-utils-pat'.
+    """Format comment as 'Used by USER - PROJECT app - managed by sfutils-pat'.
 
     Parses comment_prefix (e.g., KAMESHS_PAT_DEMO) into user + project parts.
     If no underscore found, uses the whole prefix as project name.
@@ -180,8 +180,8 @@ def format_comment(comment_prefix: str, suffix: str = "") -> str:
     parts = normalized.split("_", 1)
     if len(parts) == 2:
         user_part, project_part = parts
-        return f"Used by {user_part} - {project_part} app{suffix} - managed by snow-utils-pat"
-    return f"Used by {normalized} app{suffix} - managed by snow-utils-pat"
+        return f"Used by {user_part} - {project_part} app{suffix} - managed by sfutils-pat"
+    return f"Used by {normalized} app{suffix} - managed by sfutils-pat"
 
 
 def get_service_user_and_role_sql(
@@ -404,7 +404,7 @@ def verify_connection(
 ) -> None:
     """Verify the PAT using the Python connector (PROGRAMMATIC_ACCESS_TOKEN).
 
-    Avoids ``snow sql`` with ``SNOWFLAKE_PASSWORD`` (see snow-utils-pat skill Step 6).
+    Avoids ``snow sql`` with ``SNOWFLAKE_PASSWORD`` (see sf-utils-pat skill Step 6).
     """
     click.echo("Verifying connection with PAT...")
 
@@ -438,7 +438,7 @@ load_dotenv()
 @click.option(
     "--comment",
     "-c",
-    envvar="SNOW_UTILS_COMMENT",
+    envvar=["SF_UTILS_COMMENT", "SNOW_UTILS_COMMENT"],
     default=None,
     help="Comment prefix for SQL resources (inferred from SA_USER if not provided)",
 )
@@ -466,7 +466,13 @@ def cli(ctx: click.Context, verbose: bool, debug: bool, comment: str | None) -> 
 @cli.command(name="create")
 @click.option("--user", "-u", envvar="SA_USER", required=True, help="Service account user name")
 @click.option("--role", "-r", envvar="SA_ROLE", required=True, help="Role restriction for the PAT")
-@click.option("--db", "-d", envvar="SNOW_UTILS_DB", required=True, help="Database for PAT objects")
+@click.option(
+    "--db",
+    "-d",
+    envvar=["SF_UTILS_DB", "SNOW_UTILS_DB"],
+    required=True,
+    help="Database for PAT objects",
+)
 @click.option("--pat-name", default=None, envvar="PAT_NAME", help="Name for the PAT token")
 @click.option("--rotate/--no-rotate", default=True, help="Rotate existing PAT (default: True)")
 @click.option(
@@ -530,7 +536,7 @@ def cli(ctx: click.Context, verbose: bool, debug: bool, comment: str | None) -> 
 @click.option(
     "--skip-network",
     is_flag=True,
-    help="Skip network rule/policy creation (use when delegating to snow-utils-networks skill)",
+    help="Skip network rule/policy creation (use when delegating to sf-utils-networks skill)",
 )
 @click.option(
     "--dot-env-file",
@@ -581,7 +587,7 @@ def create_command(
     Create or rotate a PAT for a service user.
 
     Network policy is REQUIRED for PAT security (Snowflake best practice).
-    Use --skip-network if network resources were created by snow-utils-networks skill.
+    Use --skip-network if network resources were created by sf-utils-networks skill.
 
     \b
     Steps:
@@ -597,7 +603,7 @@ def create_command(
         # Basic usage - local IP only (most secure)
         pat.py create --user my_sa --role demo_role --db my_db
 
-        # Skip network (created by snow-utils-networks skill)
+        # Skip network (created by sf-utils-networks skill)
         pat.py create --user my_sa --role demo_role --db my_db --skip-network
 
         # Allow GitHub Actions (Snowflake-managed network rule on the policy)
@@ -668,7 +674,7 @@ def create_command(
             if allow_gh:
                 click.echo(f"GitHub:   {SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN} (hybrid policy)")
         else:
-            click.echo("Network:  (skipped - delegated to snow-utils-networks)")
+            click.echo("Network:  (skipped - delegated to sf-utils-networks)")
         click.echo()
 
     if dry_run:
@@ -694,7 +700,7 @@ def create_command(
             click.echo()
             click.echo("-- Step 3: Create authentication policy")
         else:
-            click.echo("-- Step 2: (Network skipped - use snow-utils-networks skill)")
+            click.echo("-- Step 2: (Network skipped - use sf-utils-networks skill)")
             click.echo()
             click.echo("-- Step 3: Create authentication policy")
         click.echo(
@@ -739,7 +745,7 @@ def create_command(
         assign_network_policy_to_user(user, policy_name, admin_role=admin_role)
         click.echo(f"✓ Assigned network policy to user {user}")
     else:
-        click.echo("Network setup skipped (delegated to snow-utils-networks skill)")
+        click.echo("Network setup skipped (delegated to sf-utils-networks skill)")
 
     setup_auth_policy(
         user=user,
@@ -801,7 +807,13 @@ def create_command(
 
 @cli.command(name="remove")
 @click.option("--user", "-u", envvar="SA_USER", required=True, help="Service account user name")
-@click.option("--db", "-d", envvar="SNOW_UTILS_DB", required=True, help="Database for PAT objects")
+@click.option(
+    "--db",
+    "-d",
+    envvar=["SF_UTILS_DB", "SNOW_UTILS_DB"],
+    required=True,
+    help="Database for PAT objects",
+)
 @click.option("--pat-name", default=None, envvar="PAT_NAME", help="Name of the PAT to remove")
 @click.option("--drop-user", is_flag=True, help="Also drop the service user")
 @click.option("--pat-only", is_flag=True, help="Only remove PAT, keep policies")
@@ -1089,7 +1101,7 @@ def verify_command(
 
     \b
     Example:
-        snow-utils-pat verify --user my_sa --role demo_role
+        sfutils-pat verify --user my_sa --role demo_role
     """
     if not pat_name:
         pat_name = f"{user}_pat".upper()
