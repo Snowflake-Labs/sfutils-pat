@@ -43,6 +43,14 @@ def resolved_sf_utils_db(*, database: str | None, default_db: str) -> str:
     )
 
 
+def resolved_sa_admin_role(*, admin_role: str | None) -> str:
+    """Resolve admin role: --admin-role / SA_ADMIN_ROLE, then ACCOUNTADMIN."""
+    for candidate in (admin_role, os.environ.get("SA_ADMIN_ROLE")):
+        if candidate and str(candidate).strip():
+            return str(candidate).strip()
+    return "ACCOUNTADMIN"
+
+
 def require_snow_cli() -> None:
     """Exit 2 if `snow` is not on PATH."""
     if not shutil.which("snow"):
@@ -82,19 +90,20 @@ def check_database_exists(db_name: str) -> bool:
         return False
 
 
-def do_run_setup(db_name: str, script_dir: Path) -> bool:
-    """Run the setup script with ACCOUNTADMIN."""
+def do_run_setup(db_name: str, script_dir: Path, admin_role: str) -> bool:
+    """Run the setup script using admin_role for snow CLI and templating env."""
     setup_sql = script_dir / "sfutils-setup.sql"
     if not setup_sql.exists():
         click.echo(click.style(f"Setup script not found: {setup_sql}", fg="red"))
         return False
 
-    click.echo("\nRunning setup with ACCOUNTADMIN...")
+    click.echo(f"\nRunning setup with role {admin_role}...")
     click.echo(f"  SF_UTILS_DB: {db_name}")
     click.echo()
 
     env = os.environ.copy()
     env["SF_UTILS_DB"] = db_name
+    env["SA_ADMIN_ROLE"] = admin_role
 
     cmd = [
         "snow",
@@ -104,7 +113,7 @@ def do_run_setup(db_name: str, script_dir: Path) -> bool:
         "--enable-templating",
         "ALL",
         "--role",
-        "ACCOUNTADMIN",
+        admin_role,
     ]
 
     result = subprocess.run(cmd, env=env, capture_output=False)
@@ -125,7 +134,13 @@ def do_run_setup(db_name: str, script_dir: Path) -> bool:
 )
 @click.option("--run-setup", is_flag=True, help="Run setup if infrastructure missing")
 @click.option("--suggest", is_flag=True, help="Output suggested defaults as JSON")
-def check(database: str | None, run_setup: bool, suggest: bool):
+@click.option(
+    "--admin-role",
+    envvar="SA_ADMIN_ROLE",
+    default=None,
+    help="Admin role for setup (or set SA_ADMIN_ROLE env var; default ACCOUNTADMIN)",
+)
+def check(database: str | None, run_setup: bool, suggest: bool, admin_role: str | None):
     """Check if sfutils infrastructure is set up.
 
     Non-interactive - all values via CLI args or env vars.
@@ -188,7 +203,8 @@ def check(database: str | None, run_setup: bool, suggest: bool):
     click.echo(f"  - Database: {db_name}")
     click.echo(f"  - Schemas: {db_name}.NETWORKS, {db_name}.POLICIES")
 
-    success = do_run_setup(db_name, script_dir)
+    resolved_role = resolved_sa_admin_role(admin_role=admin_role)
+    success = do_run_setup(db_name, script_dir, resolved_role)
     sys.exit(0 if success else 1)
 
 
