@@ -110,7 +110,7 @@ def get_snowflake_account() -> str:
         data = json.loads(result.stdout)
     except json.JSONDecodeError as e:
         raise click.ClickException(
-            f"Invalid JSON from connection test: {e}\nOutput: {result.stdout[:500]}"
+            f"Invalid JSON from connection test: {e}"
         )
 
     account = data.get("Account") or data.get("account")
@@ -135,7 +135,7 @@ def get_snowflake_connection_metadata() -> tuple[str, str | None]:
         data = json.loads(result.stdout)
     except json.JSONDecodeError as e:
         raise click.ClickException(
-            f"Invalid JSON from connection test: {e}\nOutput: {result.stdout[:500]}"
+            f"Invalid JSON from connection test: {e}"
         )
 
     account = data.get("Account") or data.get("account")
