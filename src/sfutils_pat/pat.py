@@ -149,8 +149,8 @@ def normalize_identifier(name: str, style: str = "snowflake") -> str:
     Returns:
         Normalized identifier safe for SQL or AWS DNS
     """
-    clean = re.sub(r"[^a-zA-Z0-9\\s\\-_]", "", name)
-    clean = re.sub(r"\\s+", "_" if style == "snowflake" else "-", clean)
+    clean = re.sub(r"[^a-zA-Z0-9\s\-_]", "", name)
+    clean = re.sub(r"\s+", "_" if style == "snowflake" else "-", clean)
     clean = re.sub(r"[-_]+", "_" if style == "snowflake" else "-", clean)
     clean = clean.strip("-_")
 
