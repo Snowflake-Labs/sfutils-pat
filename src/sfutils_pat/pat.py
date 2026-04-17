@@ -65,6 +65,17 @@ def _sql_str(value: str) -> str:
     return value.replace("'", "''")
 
 
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+
+
+def _assert_safe_identifier(value: str, label: str = "identifier") -> None:
+    """Raise ClickException if value is not a safe unquoted SQL identifier."""
+    if not _IDENT_RE.match(value):
+        raise click.ClickException(
+            f"Invalid {label} '{value}': must match ^[A-Za-z_][A-Za-z0-9_$]*$"
+        )
+
+
 def _confirm_remove_step(*, skip_all_prompts: bool, message: str) -> bool:
     """If skip_all_prompts, return True. Else prompt; return False if user declines."""
     if skip_all_prompts:
@@ -193,6 +204,9 @@ def get_service_user_and_role_sql(
     user: str, pat_role: str, comment_prefix: str, admin_role: str = "accountadmin"
 ) -> str:
     """Generate SQL for creating service user and role (idempotent)."""
+    _assert_safe_identifier(user, "user")
+    _assert_safe_identifier(pat_role, "pat_role")
+    _assert_safe_identifier(admin_role, "admin_role")
     comment = format_comment(comment_prefix)
     return f"""USE ROLE {admin_role};
 -- Create PAT role if not exists
@@ -224,6 +238,9 @@ def get_auth_policy_sql(
     admin_role: str = "accountadmin",
 ) -> str:
     """Generate SQL for creating authentication policy (idempotent)."""
+    _assert_safe_identifier(user, "user")
+    _assert_safe_identifier(db, "db")
+    _assert_safe_identifier(admin_role, "admin_role")
     auth_policy_name = f"{user}_auth_policy".upper()
     comment = format_comment(comment_prefix)
 
@@ -260,6 +277,9 @@ def setup_auth_policy(
 
 def remove_auth_policy(user: str, db: str, admin_role: str = "accountadmin") -> None:
     """Remove authentication policy for a user (idempotent)."""
+    _assert_safe_identifier(user, "user")
+    _assert_safe_identifier(db, "db")
+    _assert_safe_identifier(admin_role, "admin_role")
     auth_policy_name = f"{user}_auth_policy".upper()
 
     click.echo(f"Removing authentication policy: {db}.POLICIES.{auth_policy_name}")
@@ -275,6 +295,7 @@ def remove_auth_policy(user: str, db: str, admin_role: str = "accountadmin") -> 
 
 def get_existing_pat(user: str, pat_name: str, admin_role: str = "accountadmin") -> str | None:
     """Check if a PAT with the given name exists for the user."""
+    _assert_safe_identifier(user, "user")
     result = run_snow_sql(f"SHOW USER PATS FOR USER {user}", role=admin_role)
 
     if not result:
@@ -289,6 +310,9 @@ def get_existing_pat(user: str, pat_name: str, admin_role: str = "accountadmin")
 
 def get_pat_sql(user: str, pat_role: str, pat_name: str) -> str:
     """Generate SQL for creating PAT."""
+    _assert_safe_identifier(user, "user")
+    _assert_safe_identifier(pat_role, "pat_role")
+    _assert_safe_identifier(pat_name, "pat_name")
     return f"ALTER USER IF EXISTS {user} ADD PAT {pat_name} ROLE_RESTRICTION = {pat_role};"
 
 
@@ -296,6 +320,9 @@ def create_or_rotate_pat(
     user: str, pat_role: str, pat_name: str, rotate: bool = False, admin_role: str = "accountadmin"
 ) -> str:
     """Create a new PAT or rotate an existing one (idempotent for rotate=True)."""
+    _assert_safe_identifier(user, "user")
+    _assert_safe_identifier(pat_role, "pat_role")
+    _assert_safe_identifier(pat_name, "pat_name")
     existing = get_existing_pat(user, pat_name, admin_role=admin_role)
 
     if existing and not rotate:
@@ -323,6 +350,8 @@ def create_or_rotate_pat(
 
 def remove_pat(user: str, pat_name: str, admin_role: str = "accountadmin") -> None:
     """Remove a PAT from a user (idempotent)."""
+    _assert_safe_identifier(user, "user")
+    _assert_safe_identifier(pat_name, "pat_name")
     click.echo(f"Removing PAT '{pat_name}' from user {user}...")
 
     existing = get_existing_pat(user, pat_name, admin_role=admin_role)
@@ -336,6 +365,8 @@ def remove_pat(user: str, pat_name: str, admin_role: str = "accountadmin") -> No
 
 def remove_service_user(user: str, admin_role: str = "accountadmin") -> None:
     """Drop the service user (idempotent)."""
+    _assert_safe_identifier(user, "user")
+    _assert_safe_identifier(admin_role, "admin_role")
     click.echo(f"Dropping service user: {user}")
 
     sql = f"""

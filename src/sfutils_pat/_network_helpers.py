@@ -25,6 +25,17 @@ def _sql_str(value: str) -> str:
     return value.replace("'", "''")
 
 
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+
+
+def _assert_safe_identifier(value: str, label: str = "identifier") -> None:
+    """Raise ClickException if value is not a safe unquoted SQL identifier."""
+    if not _IDENT_RE.match(value):
+        raise click.ClickException(
+            f"Invalid {label} '{value}': must match ^[A-Za-z_][A-Za-z0-9_$]*$"
+        )
+
+
 def normalize_identifier(name: str, style: str = "snowflake") -> str:
     """Normalize name for SQL or DNS compliance."""
     clean = re.sub(r"[^a-zA-Z0-9\s\-_]", "", name)
@@ -49,6 +60,9 @@ def get_network_rule_sql(
     force: bool = False,
 ) -> str:
     """Generate SQL for creating a network rule."""
+    _assert_safe_identifier(name, "name")
+    _assert_safe_identifier(db, "db")
+    _assert_safe_identifier(schema, "schema")
     value_list = ", ".join(f"'{_sql_str(v)}'" for v in values)
     comment_text = comment or "Created by sfutils"
     return f"""CREATE OR REPLACE NETWORK RULE {db}.{schema}.{name}
@@ -65,6 +79,7 @@ def get_network_policy_sql(
     force: bool = False,
 ) -> str:
     """Generate SQL for creating a network policy."""
+    _assert_safe_identifier(policy_name, "policy_name")
     rule_list = ", ".join(rule_refs)
     comment_text = comment or "Created by sfutils"
     return f"""CREATE NETWORK POLICY IF NOT EXISTS {policy_name}
@@ -92,6 +107,8 @@ def get_policies_for_rule(
 
 def detach_rule_from_policy(policy_name: str, admin_role: str = "accountadmin") -> None:
     """Temporarily detach all rules from a policy."""
+    _assert_safe_identifier(policy_name, "policy_name")
+    _assert_safe_identifier(admin_role, "admin_role")
     sql = f"USE ROLE {admin_role};\nALTER NETWORK POLICY IF EXISTS {policy_name} SET ALLOWED_NETWORK_RULE_LIST = ();"
     run_snow_sql_stdin(sql)
 

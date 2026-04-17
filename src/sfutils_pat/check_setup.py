@@ -20,6 +20,7 @@ validate SA_ROLE or other skill-specific objects.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -86,8 +87,20 @@ def _sql_str(value: str) -> str:
     return value.replace("'", "''")
 
 
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+
+
+def _assert_safe_identifier(value: str, label: str = "identifier") -> None:
+    """Raise ClickException if value is not a safe unquoted SQL identifier."""
+    if not _IDENT_RE.match(value):
+        raise click.ClickException(
+            f"Invalid {label} '{value}': must match ^[A-Za-z_][A-Za-z0-9_$]*$"
+        )
+
+
 def check_database_exists(db_name: str) -> bool:
     """Check if a database exists."""
+    _assert_safe_identifier(db_name, "db_name")
     try:
         result = run_sql(f"SHOW DATABASES LIKE '{_sql_str(db_name)}'")
         return result is not None and len(result) > 0
