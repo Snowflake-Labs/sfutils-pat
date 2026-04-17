@@ -20,6 +20,11 @@ from sfutils_pat._presets import (
 from sfutils_pat._snow import run_snow_sql, run_snow_sql_stdin
 
 
+def _sql_str(value: str) -> str:
+    """Escape a value for safe use inside a SQL single-quoted literal."""
+    return value.replace("'", "''")
+
+
 def normalize_identifier(name: str, style: str = "snowflake") -> str:
     """Normalize name for SQL or DNS compliance."""
     clean = re.sub(r"[^a-zA-Z0-9\s\-_]", "", name)
@@ -44,13 +49,13 @@ def get_network_rule_sql(
     force: bool = False,
 ) -> str:
     """Generate SQL for creating a network rule."""
-    value_list = ", ".join(f"'{v}'" for v in values)
+    value_list = ", ".join(f"'{_sql_str(v)}'" for v in values)
     comment_text = comment or "Created by sfutils"
     return f"""CREATE OR REPLACE NETWORK RULE {db}.{schema}.{name}
     MODE = {mode.value}
     TYPE = {rule_type.value}
     VALUE_LIST = ({value_list})
-    COMMENT = '{comment_text}';"""
+    COMMENT = '{_sql_str(comment_text)}';"""
 
 
 def get_network_policy_sql(
@@ -64,7 +69,7 @@ def get_network_policy_sql(
     comment_text = comment or "Created by sfutils"
     return f"""CREATE NETWORK POLICY IF NOT EXISTS {policy_name}
     ALLOWED_NETWORK_RULE_LIST = ({rule_list})
-    COMMENT = '{comment_text}';"""
+    COMMENT = '{_sql_str(comment_text)}';"""
 
 
 def get_policies_for_rule(
@@ -98,7 +103,7 @@ def set_policy_allowed_rule_list(
     if not rule_refs:
         detach_rule_from_policy(policy_name, admin_role=admin_role)
         return
-    rule_list = ", ".join(f"'{r}'" for r in rule_refs)
+    rule_list = ", ".join(f"'{_sql_str(r)}'" for r in rule_refs)
     sql = f"USE ROLE {admin_role};\nALTER NETWORK POLICY IF EXISTS {policy_name} SET ALLOWED_NETWORK_RULE_LIST = ({rule_list});"
     run_snow_sql_stdin(sql)
 
@@ -337,5 +342,5 @@ def assign_network_policy_to_user(
 ) -> None:
     """Assign a network policy to a user."""
     run_snow_sql_stdin(
-        f"USE ROLE {admin_role};\nALTER USER {user} SET NETWORK_POLICY = '{policy_name}';"
+        f"USE ROLE {admin_role};\nALTER USER {user} SET NETWORK_POLICY = '{_sql_str(policy_name)}';"
     )

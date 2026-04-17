@@ -60,6 +60,11 @@ from sfutils_pat._verify_pat_connector import verify_pat_with_connector
 _LEGACY_DOTENV_RAW_PAT_KEY = "SA_PAT"
 
 
+def _sql_str(value: str) -> str:
+    """Escape a value for safe use inside a SQL single-quoted literal."""
+    return value.replace("'", "''")
+
+
 def _confirm_remove_step(*, skip_all_prompts: bool, message: str) -> bool:
     """If skip_all_prompts, return True. Else prompt; return False if user declines."""
     if skip_all_prompts:
@@ -192,11 +197,11 @@ def get_service_user_and_role_sql(
     return f"""USE ROLE {admin_role};
 -- Create PAT role if not exists
 CREATE ROLE IF NOT EXISTS {pat_role}
-    COMMENT = '{comment}';
+    COMMENT = '{_sql_str(comment)}';
 -- Create service user
 CREATE USER IF NOT EXISTS {user}
     TYPE = SERVICE
-    COMMENT = '{comment}';
+    COMMENT = '{_sql_str(comment)}';
 GRANT ROLE {pat_role} TO USER {user};"""
 
 
@@ -231,7 +236,7 @@ CREATE OR ALTER AUTHENTICATION POLICY {db}.POLICIES.{auth_policy_name}
         MAX_EXPIRY_IN_DAYS = {max_expiry_days}
         NETWORK_POLICY_EVALUATION = ENFORCED_REQUIRED
     )
-    COMMENT = '{comment}';
+    COMMENT = '{_sql_str(comment)}';
 
 ALTER USER {user} SET AUTHENTICATION POLICY {db}.POLICIES.{auth_policy_name};"""
 
