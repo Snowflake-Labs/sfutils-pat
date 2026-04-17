@@ -13,10 +13,20 @@ patterns; this package is fully self-contained.
 # See https://docs.snowflake.com/en/user-guide/network-rules.html#snowflake-managed-network-rules
 SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN = "SNOWFLAKE.NETWORK_SECURITY.GITHUBACTIONS_GLOBAL"
 
+import ipaddress
 from enum import Enum
 from functools import lru_cache
 
+import click
 import requests
+
+
+def _validate_cidr(cidr: str) -> str:
+    """Validate and normalise a CIDR string. Raises ClickException on bad input."""
+    try:
+        return str(ipaddress.ip_network(cidr, strict=False))
+    except ValueError as e:
+        raise click.ClickException(f"Invalid CIDR '{cidr}': {e}")
 
 
 class NetworkRuleMode(str, Enum):
@@ -71,7 +81,7 @@ def get_github_actions_ips() -> tuple[str, ...]:
     response = requests.get("https://api.github.com/meta", timeout=30)
     response.raise_for_status()
     all_ips = response.json().get("actions", [])
-    return tuple(ip for ip in all_ips if _is_ipv4_cidr(ip))
+    return tuple(_validate_cidr(ip) for ip in all_ips if _is_ipv4_cidr(ip))
 
 
 @lru_cache(maxsize=1)
@@ -80,14 +90,15 @@ def get_google_ips() -> tuple[str, ...]:
     response = requests.get("https://www.gstatic.com/ipranges/goog.json", timeout=30)
     response.raise_for_status()
     prefixes = response.json().get("prefixes", [])
-    return tuple(p["ipv4Prefix"] for p in prefixes if "ipv4Prefix" in p)
+    return tuple(_validate_cidr(p["ipv4Prefix"]) for p in prefixes if "ipv4Prefix" in p)
 
 
 def get_local_ip() -> str:
     """Get current public IP address with /32 CIDR suffix."""
     response = requests.get("https://api.ipify.org", timeout=10)
     response.raise_for_status()
-    return f"{response.text.strip()}/32"
+    cidr = f"{response.text.strip()}/32"
+    return _validate_cidr(cidr)
 
 
 def collect_ipv4_cidrs(
@@ -103,6 +114,6 @@ def collect_ipv4_cidrs(
     if with_google:
         cidrs.extend(get_google_ips())
     if extra_cidrs:
-        cidrs.extend(extra_cidrs)
+        cidrs.extend(_validate_cidr(c) for c in extra_cidrs)
 
     return list(dict.fromkeys(cidrs))
