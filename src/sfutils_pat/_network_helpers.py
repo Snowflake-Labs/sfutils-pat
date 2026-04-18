@@ -91,6 +91,7 @@ def get_policies_for_rule(
     rule_fqn: str, expected_policy_name: str, admin_role: str = "accountadmin"
 ) -> list[str]:
     """Check if the expected policy contains this network rule."""
+    _assert_safe_identifier(expected_policy_name, "expected_policy_name")
     result = []
     try:
         desc = run_snow_sql(f"DESC NETWORK POLICY {expected_policy_name}", role=admin_role) or []
@@ -120,6 +121,8 @@ def set_policy_allowed_rule_list(
     policy_name: str, rule_refs: list[str], admin_role: str = "accountadmin"
 ) -> None:
     """Set a network policy's ALLOWED_NETWORK_RULE_LIST (replaces previous list)."""
+    _assert_safe_identifier(policy_name, "policy_name")
+    _assert_safe_identifier(admin_role, "admin_role")
     if not rule_refs:
         detach_rule_from_policy(policy_name, admin_role=admin_role)
         return
@@ -164,6 +167,7 @@ def create_network_rule(
     CREATE OR REPLACE and re-attached with ``policy_rule_refs`` when provided
     (hybrid policies with Snowflake-managed rules); otherwise only this rule.
     """
+    _assert_safe_identifier(admin_role, "admin_role")
     if not validate_mode_type(mode, rule_type):
         valid = get_valid_types_for_mode(mode)
         raise click.ClickException(
@@ -211,6 +215,7 @@ def create_network_policy(
     admin_role: str = "accountadmin",
 ) -> None:
     """Create a network policy referencing given rules."""
+    _assert_safe_identifier(admin_role, "admin_role")
     sql = get_network_policy_sql(policy_name, rule_refs, comment, force)
 
     if dry_run:
@@ -221,11 +226,17 @@ def create_network_policy(
 
 def delete_network_rule(name: str, db: str, schema: str, admin_role: str = "accountadmin") -> None:
     """Delete a network rule (idempotent)."""
+    _assert_safe_identifier(name, "name")
+    _assert_safe_identifier(db, "db")
+    _assert_safe_identifier(schema, "schema")
+    _assert_safe_identifier(admin_role, "admin_role")
     run_snow_sql_stdin(f"USE ROLE {admin_role};\nDROP NETWORK RULE IF EXISTS {db}.{schema}.{name}")
 
 
 def delete_network_policy(policy_name: str, admin_role: str = "accountadmin") -> None:
     """Delete a network policy (idempotent)."""
+    _assert_safe_identifier(policy_name, "policy_name")
+    _assert_safe_identifier(admin_role, "admin_role")
     run_snow_sql_stdin(f"USE ROLE {admin_role};\nDROP NETWORK POLICY IF EXISTS {policy_name}")
 
 
@@ -240,6 +251,7 @@ def get_setup_network_for_user_sql(
     allow_managed_github: bool = False,
 ) -> str:
     """Generate SQL for creating network rule and policy for a user."""
+    _assert_safe_identifier(admin_role, "admin_role")
     rule_name = f"{user}_NETWORK_RULE".upper()
     policy_name = f"{user}_NETWORK_POLICY".upper()
     rule_fqn = f"{db.upper()}.{schema.upper()}.{rule_name}"
@@ -352,6 +364,8 @@ def cleanup_network_for_user(
     admin_role: str = "accountadmin",
 ) -> None:
     """Remove network rule and policy for a user (idempotent)."""
+    _assert_safe_identifier(user, "user")
+    _assert_safe_identifier(admin_role, "admin_role")
     rule_name = f"{user}_NETWORK_RULE".upper()
     policy_name = f"{user}_NETWORK_POLICY".upper()
 
@@ -369,6 +383,8 @@ def assign_network_policy_to_user(
     user: str, policy_name: str, admin_role: str = "accountadmin"
 ) -> None:
     """Assign a network policy to a user."""
+    _assert_safe_identifier(user, "user")
+    _assert_safe_identifier(admin_role, "admin_role")
     run_snow_sql_stdin(
         f"USE ROLE {admin_role};\nALTER USER {user} SET NETWORK_POLICY = '{_sql_str(policy_name)}';"
     )
