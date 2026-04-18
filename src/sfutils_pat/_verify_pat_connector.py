@@ -9,6 +9,8 @@ See https://docs.snowflake.com/en/user-guide/programmatic-access-tokens.html
 from __future__ import annotations
 
 import click
+import snowflake.connector
+from snowflake.connector.errors import Error as SnowflakeConnectorError
 
 # Snowflake docs: PAT with Python connector uses authenticator + token parameter.
 # https://docs.snowflake.com/en/developer-guide/python-connector/python-connector-connect
@@ -23,9 +25,6 @@ def verify_pat_with_connector(
     host: str | None = None,
 ) -> None:
     """Open a short-lived connection with the PAT and run a trivial query."""
-    import snowflake.connector
-    from snowflake.connector.errors import Error as SnowflakeConnectorError
-
     connect_kwargs: dict[str, str] = {
         "account": account,
         "user": user,

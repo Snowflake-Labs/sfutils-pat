@@ -8,17 +8,17 @@ policy, not GitHub meta API lists. Originally aligned with shared sfutils
 patterns; this package is fully self-contained.
 """
 
-# Snowflake-managed ingress rule for GitHub Actions (hybrid policy). Confirm in-account with:
-# SHOW NETWORK RULES IN SNOWFLAKE.NETWORK_SECURITY;
-# See https://docs.snowflake.com/en/user-guide/network-rules.html#snowflake-managed-network-rules
-SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN = "SNOWFLAKE.NETWORK_SECURITY.GITHUBACTIONS_GLOBAL"
-
 import ipaddress
-from enum import Enum
+from enum import StrEnum
 from functools import lru_cache
 
 import click
 import requests
+
+# Snowflake-managed ingress rule for GitHub Actions (hybrid policy). Confirm in-account with:
+# SHOW NETWORK RULES IN SNOWFLAKE.NETWORK_SECURITY;
+# See https://docs.snowflake.com/en/user-guide/network-rules.html#snowflake-managed-network-rules
+SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN = "SNOWFLAKE.NETWORK_SECURITY.GITHUBACTIONS_GLOBAL"
 
 
 def _validate_cidr(cidr: str) -> str:
@@ -26,10 +26,10 @@ def _validate_cidr(cidr: str) -> str:
     try:
         return str(ipaddress.ip_network(cidr, strict=False))
     except ValueError as e:
-        raise click.ClickException(f"Invalid CIDR '{cidr}': {e}")
+        raise click.ClickException(f"Invalid CIDR '{cidr}': {e}") from e
 
 
-class NetworkRuleMode(str, Enum):
+class NetworkRuleMode(StrEnum):
     """Snowflake network rule modes."""
 
     INGRESS = "INGRESS"
@@ -39,7 +39,7 @@ class NetworkRuleMode(str, Enum):
     POSTGRES_EGRESS = "POSTGRES_EGRESS"
 
 
-class NetworkRuleType(str, Enum):
+class NetworkRuleType(StrEnum):
     """Snowflake network rule value types."""
 
     IPV4 = "IPV4"
@@ -106,7 +106,10 @@ def collect_ipv4_cidrs(
     with_google: bool = False,
     extra_cidrs: list[str] | None = None,
 ) -> list[str]:
-    """Collect IPv4 CIDRs for the custom user network rule (not GitHub; use managed rule + policy)."""
+    """Collect IPv4 CIDRs for the custom user network rule.
+
+    GitHub Actions uses the Snowflake-managed rule + policy instead.
+    """
     cidrs: list[str] = []
 
     if with_local:

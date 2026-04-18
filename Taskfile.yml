@@ -13,10 +13,10 @@ tasks:
       - task --list-all
 
   setup:
-    desc: Install dependencies (including dev extras for pytest)
+    desc: Install dependencies
     cmds:
       - uv venv
-      - uv sync --extra dev
+      - uv sync
 
   create:
     desc: Create/rotate PAT for service user
@@ -69,6 +69,12 @@ tasks:
     desc: Show PAT CLI options
     cmds:
       - "{{.CLI}} --help"
+
+  lint:
+    desc: Run ruff linter
+    dir: "{{.TASKFILE_DIR}}"
+    cmds:
+      - "{{.PYTHON}} ruff check src/"
 
   it-unit:
     desc: "Unit tests only (pytest; no Snowflake)"

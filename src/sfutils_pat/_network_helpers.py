@@ -109,7 +109,10 @@ def detach_rule_from_policy(policy_name: str, admin_role: str = "accountadmin") 
     """Temporarily detach all rules from a policy."""
     _assert_safe_identifier(policy_name, "policy_name")
     _assert_safe_identifier(admin_role, "admin_role")
-    sql = f"USE ROLE {admin_role};\nALTER NETWORK POLICY IF EXISTS {policy_name} SET ALLOWED_NETWORK_RULE_LIST = ();"
+    sql = (
+        f"USE ROLE {admin_role};\n"
+        f"ALTER NETWORK POLICY IF EXISTS {policy_name} SET ALLOWED_NETWORK_RULE_LIST = ();"
+    )
     run_snow_sql_stdin(sql)
 
 
@@ -121,7 +124,11 @@ def set_policy_allowed_rule_list(
         detach_rule_from_policy(policy_name, admin_role=admin_role)
         return
     rule_list = ", ".join(f"'{_sql_str(r)}'" for r in rule_refs)
-    sql = f"USE ROLE {admin_role};\nALTER NETWORK POLICY IF EXISTS {policy_name} SET ALLOWED_NETWORK_RULE_LIST = ({rule_list});"
+    sql = (
+        f"USE ROLE {admin_role};\n"
+        f"ALTER NETWORK POLICY IF EXISTS {policy_name}"
+        f" SET ALLOWED_NETWORK_RULE_LIST = ({rule_list});"
+    )
     run_snow_sql_stdin(sql)
 
 
@@ -179,7 +186,11 @@ def create_network_rule(
             for policy in attached_policies:
                 detach_rule_from_policy(policy, admin_role=admin_role)
 
-        setup_sql = f"USE ROLE {admin_role};\nCREATE DATABASE IF NOT EXISTS {db};\nCREATE SCHEMA IF NOT EXISTS {db}.{schema};\n"
+        setup_sql = (
+            f"USE ROLE {admin_role};\n"
+            f"CREATE DATABASE IF NOT EXISTS {db};\n"
+            f"CREATE SCHEMA IF NOT EXISTS {db}.{schema};\n"
+        )
         run_snow_sql_stdin(setup_sql + sql)
 
         if attached_policies:

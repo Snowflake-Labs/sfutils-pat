@@ -21,7 +21,6 @@ Network setup is handled separately via network.py.
 """
 
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -102,6 +101,7 @@ def get_snowflake_account() -> str:
         ["snow", "connection", "test", "--format", "json"],
         capture_output=True,
         text=True,
+        check=False,
     )
     if result.returncode != 0:
         raise click.ClickException(f"Failed to test connection: {result.stderr}")
@@ -111,7 +111,7 @@ def get_snowflake_account() -> str:
     except json.JSONDecodeError as e:
         raise click.ClickException(
             f"Invalid JSON from connection test: {e}"
-        )
+        ) from e
 
     account = data.get("Account") or data.get("account")
     if not account:
@@ -127,6 +127,7 @@ def get_snowflake_connection_metadata() -> tuple[str, str | None]:
         ["snow", "connection", "test", "--format", "json"],
         capture_output=True,
         text=True,
+        check=False,
     )
     if result.returncode != 0:
         raise click.ClickException(f"Failed to test connection: {result.stderr}")
@@ -136,7 +137,7 @@ def get_snowflake_connection_metadata() -> tuple[str, str | None]:
     except json.JSONDecodeError as e:
         raise click.ClickException(
             f"Invalid JSON from connection test: {e}"
-        )
+        ) from e
 
     account = data.get("Account") or data.get("account")
     if not account:
@@ -706,7 +707,8 @@ def create_command(
         click.echo(f"Database: {db}")
         click.echo(f"PAT Name: {pat_name}")
         if not skip_network:
-            click.echo(f"CIDRs:    {len(cidrs)} custom rule entr{'y' if len(cidrs) == 1 else 'ies'}")
+            suffix = "y" if len(cidrs) == 1 else "ies"
+            click.echo(f"CIDRs:    {len(cidrs)} custom rule entr{suffix}")
             if allow_gh:
                 click.echo(f"GitHub:   {SNOWFLAKE_MANAGED_GITHUB_ACTIONS_RULE_FQN} (hybrid policy)")
         else:
@@ -750,10 +752,13 @@ def create_command(
         click.echo("─" * 60)
         return
 
-    if output == "text" and not yes:
-        if not click.confirm("\nProceed with resource creation?", default=True):
-            click.echo("Aborted.")
-            return
+    if (
+        output == "text"
+        and not yes
+        and not click.confirm("\nProceed with resource creation?", default=True)
+    ):
+        click.echo("Aborted.")
+        return
 
     setup_service_user(
         user=user, pat_role=role, comment_prefix=comment_prefix, admin_role=admin_role
@@ -1197,16 +1202,15 @@ def show_pat_command(user: str, pat_name: str | None, yes: bool) -> None:
             "No PAT found in keyring for this Snowflake connection, user, and PAT name."
         )
 
-    if not yes:
-        if not click.confirm(
-            "WARNING: The raw PAT will be printed to stdout.\n"
-            "It may be captured in shell history, terminal scrollback, CI logs, "
-            "observability pipelines, and screen sharing.\n\n"
-            "Do you want to continue?",
-            default=False,
-        ):
-            click.echo("Aborted.")
-            return
+    if not yes and not click.confirm(
+        "WARNING: The raw PAT will be printed to stdout.\n"
+        "It may be captured in shell history, terminal scrollback, CI logs, "
+        "observability pipelines, and screen sharing.\n\n"
+        "Do you want to continue?",
+        default=False,
+    ):
+        click.echo("Aborted.")
+        return
 
     click.echo(
         "WARNING: PAT is printed to stdout; may be captured in shell history or logs.",
