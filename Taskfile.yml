@@ -1,0 +1,96 @@
+version: "3"
+
+dotenv: [".env"]
+
+vars:
+  PYTHON: uv run --project {{.TASKFILE_DIR}}
+  CLI: "{{.PYTHON}} sfutils-pat"
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list-all
+
+  setup:
+    desc: Install dependencies
+    cmds:
+      - uv venv
+      - uv sync
+
+  create:
+    desc: Create/rotate PAT for service user
+    cmds:
+      - "{{.CLI}} create {{.CLI_ARGS}}"
+    env:
+      SA_USER: "{{.SA_USER}}"
+      SA_ROLE: "{{.SA_ROLE}}"
+      SA_ADMIN_ROLE: "{{.SA_ADMIN_ROLE}}"
+      SF_UTILS_DB: "{{.SF_UTILS_DB}}"
+      DOT_ENV_FILE: "{{.DOT_ENV_FILE}}"
+    vars:
+      SA_USER: '{{.SA_USER | default ""}}'
+      SA_ROLE: '{{.SA_ROLE | default ""}}'
+      SA_ADMIN_ROLE: '{{.SA_ADMIN_ROLE | default ""}}'
+      SF_UTILS_DB: '{{.SF_UTILS_DB | default ""}}'
+      DOT_ENV_FILE: '{{.DOT_ENV_FILE | default ""}}'
+
+  no-rotate:
+    desc: Create PAT without rotating existing
+    cmds:
+      - "{{.CLI}} create --no-rotate {{.CLI_ARGS}}"
+    env:
+      SA_USER: "{{.SA_USER}}"
+      SA_ROLE: "{{.SA_ROLE}}"
+      SA_ADMIN_ROLE: "{{.SA_ADMIN_ROLE}}"
+      SF_UTILS_DB: "{{.SF_UTILS_DB}}"
+      DOT_ENV_FILE: "{{.DOT_ENV_FILE}}"
+    vars:
+      SA_USER: '{{.SA_USER | default ""}}'
+      SA_ROLE: '{{.SA_ROLE | default ""}}'
+      SA_ADMIN_ROLE: '{{.SA_ADMIN_ROLE | default ""}}'
+      SF_UTILS_DB: '{{.SF_UTILS_DB | default ""}}'
+      DOT_ENV_FILE: '{{.DOT_ENV_FILE | default ""}}'
+
+  remove:
+    desc: Remove PAT and associated objects
+    cmds:
+      - "{{.CLI}} remove --yes {{.CLI_ARGS}}"
+    env:
+      SA_USER: "{{.SA_USER}}"
+      SF_UTILS_DB: "{{.SF_UTILS_DB}}"
+      DOT_ENV_FILE: "{{.DOT_ENV_FILE}}"
+    vars:
+      SA_USER: '{{.SA_USER | default ""}}'
+      SF_UTILS_DB: '{{.SF_UTILS_DB | default ""}}'
+      DOT_ENV_FILE: '{{.DOT_ENV_FILE | default ""}}'
+
+  help:
+    desc: Show PAT CLI options
+    cmds:
+      - "{{.CLI}} --help"
+
+  lint:
+    desc: Run ruff linter
+    dir: "{{.TASKFILE_DIR}}"
+    cmds:
+      - "{{.PYTHON}} ruff check src/"
+
+  it-unit:
+    desc: "Unit tests only (pytest; no Snowflake)"
+    dir: "{{.TASKFILE_DIR}}"
+    cmds:
+      - "{{.PYTHON}} pytest -q"
+
+  it-smoke:
+    desc: "IT shell smoke — snow JSON, create --dry-run, keyring dummy roundtrip (docs/it/README.md)"
+    dir: "{{.TASKFILE_DIR}}"
+    cmds:
+      - bash scripts/it/smoke.sh
+
+  it:
+    desc: "IT pipeline — it-unit, then it-smoke (automated IT is smoke.sh, not duplicate pytest)"
+    dir: "{{.TASKFILE_DIR}}"
+    cmds:
+      - task it-unit
+      - task it-smoke
