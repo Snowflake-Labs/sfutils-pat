@@ -980,7 +980,7 @@ def create_command(
     _pat_config: dict = {
         "status": "COMPLETE",
         "created_at": _now,
-        "updated_at": _now,
+        "rotated_at": _now,
         "sa_user": user.upper(),
         "sa_role": role.upper(),
         "pat_name": pat_name.upper(),
@@ -1250,7 +1250,9 @@ def remove_command(
     default=False,
     help="Print PAT to stdout after storing in keyring (insecure; cannot use with -o json)",
 )
+@click.pass_context
 def rotate_command(
+    ctx: click.Context,
     user: str,
     role: str,
     pat_name: str | None,
@@ -1312,6 +1314,17 @@ def rotate_command(
         click.echo(password)
 
     update_env_non_secrets(env_path, user, role)
+
+    # Update rotated_at in manifest so the rotation timestamp is always current.
+    _mpath: Path = ctx.obj.get("manifest_path", Path(".sfutils/manifest.toml"))
+    if _mpath.exists():
+        _mdata = load_manifest(_mpath)
+        _rot_now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for _entry in _mdata.get("pat", {}).values():
+            if _entry.get("sa_user", "").upper() == user.upper():
+                _entry["rotated_at"] = _rot_now
+                break
+        save_manifest(_mpath, _mdata)
 
     if not skip_verify:
         loaded = load_pat(host, account, user, pat_name)
@@ -1555,7 +1568,7 @@ def migrate_command(
         pat_config: dict = {
             "status": "COMPLETE",
             "created_at": _now,
-            "updated_at": _now,
+            "rotated_at": _now,
             "sa_user": sa_user.upper(),
             "sa_role": sa_role.upper(),
             "pat_name": f"{sa_user.upper()}_PAT",
