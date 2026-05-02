@@ -20,6 +20,7 @@ Sets up a service user with authentication policies and creates/rotates PATs.
 Network setup is handled separately via network.py.
 """
 
+import datetime
 import json
 import re
 import shutil
@@ -28,7 +29,7 @@ import sys
 from pathlib import Path
 
 import click
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 from sfutils_pat._keyring_store import (
     build_pat_credential_service,
@@ -50,8 +51,19 @@ from sfutils_pat._snow import (
     get_snow_cli_options,
     run_snow_sql,
     run_snow_sql_stdin,
+    set_connection,
     set_masking,
     set_snow_cli_options,
+)
+from sfutils_pat._toml_manifest import (
+    ensure_manifest_defaults,
+    get_pat_entry,
+    load_manifest,
+    resolve_pat_connection,
+    save_manifest,
+    update_pat_status,
+    upsert_pat,
+    validate_manifest,
 )
 from sfutils_pat._verify_pat_connector import verify_pat_with_connector
 
@@ -464,9 +476,59 @@ def verify_connection(
     click.echo("✓ Connection verified successfully")
 
 
-# Auto-load .env from current working directory so callers
-# don't need ``set -a && source .env && set +a`` before invoking.
-load_dotenv()
+def _persist_pat_state(
+    manifest_path: Path,
+    env_path: Path,
+    user: str,
+    role: str,
+    label: str,
+    pat_config: dict,
+) -> None:
+    """Write PAT entry to manifest.toml and update .env for backward compat.
+
+    The manifest.toml upsert is the primary state store for multi-PAT projects.
+    The .env update is kept so single-PAT / legacy consumers are not broken.
+    """
+    data = load_manifest(manifest_path)
+    ensure_manifest_defaults(data, manifest_path)
+    upsert_pat(data, label, pat_config)
+    save_manifest(manifest_path, data)
+    click.echo(f"✓ Updated {manifest_path} with PAT entry '{label}' for {user}")
+    # Backward compat: still write SA_USER / SA_ROLE to .env if the file exists.
+    update_env_non_secrets(env_path, user, role)
+
+
+def _resolve_user_role_from_profile(
+    profile: str | None,
+    user: str | None,
+    role: str | None,
+    manifest_path: Path,
+) -> tuple[str | None, str | None]:
+    """If --profile is given, fill in any missing --user / --role from manifest.toml.
+
+    Also switches the active Snowflake connection to the PAT entry's connection
+    override (if set), so rotate/verify/remove all use the right account.
+    """
+    if not profile:
+        return user, role
+    data = load_manifest(manifest_path)
+    entry = get_pat_entry(data, label=profile)
+    if entry is None:
+        raise click.ClickException(
+            f"Profile '{profile}' not found in manifest.toml. "
+            "Run 'sfutils-pat list' to see available profiles."
+        )
+    # Switch connection if the PAT entry has a per-PAT override.
+    pat_conn = entry.get("connection")
+    if pat_conn:
+        set_connection(pat_conn)
+    return user or entry.get("sa_user"), role or entry.get("sa_role")
+
+
+# Auto-load connection from manifest when available.
+# load_dotenv() is intentionally NOT called — manifest.toml is the canonical
+# config source.  SNOWFLAKE_DEFAULT_CONNECTION_NAME in the shell environment
+# still works as a fallback via resolve_pat_connection().
 
 
 @click.group(invoke_without_command=True)
@@ -479,30 +541,101 @@ load_dotenv()
     default=None,
     help="Comment prefix for SQL resources (inferred from SA_USER if not provided)",
 )
+@click.option(
+    "--manifest-path",
+    "-m",
+    type=click.Path(path_type=Path),
+    default=Path(".sfutils/manifest.toml"),
+    show_default=True,
+    help="Path to TOML manifest (default: .sfutils/manifest.toml)",
+)
 @click.pass_context
-def cli(ctx: click.Context, verbose: bool, debug: bool, comment: str | None) -> None:
+def cli(
+    ctx: click.Context,
+    verbose: bool,
+    debug: bool,
+    comment: str | None,
+    manifest_path: Path,
+) -> None:
     """
     Snowflake PAT Manager - Manage service users with programmatic access tokens.
 
     \b
     Commands:
-        create   - Create/rotate PAT for service user
-        rotate   - Rotate existing PAT (keep policies)
-        verify   - Test PAT connection (PAT from keyring only)
-        show-pat - Print PAT from keyring to stdout (insecure)
-        remove   - Remove PAT and associated objects
+        create             - Create/rotate PAT for service user
+        rotate             - Rotate existing PAT (keep policies)
+        verify             - Test PAT connection (PAT from keyring only)
+        show-pat           - Print PAT from keyring to stdout (insecure)
+        remove             - Remove PAT and associated objects
+        list               - List all PATs from manifest.toml
+        setup-connection   - Set project Snowflake connection in manifest.toml
+        validate-manifest  - Validate (and optionally repair) manifest.toml
+        migrate            - Migrate .env + sfutils-manifest.md to manifest.toml
     """
     set_snow_cli_options(verbose=verbose, debug=debug)
     ctx.ensure_object(dict)
     ctx.obj["comment"] = comment
+    ctx.obj["manifest_path"] = manifest_path
+
+    # Set connection from manifest so all snow SQL calls use -c <connection>.
+    _manifest = load_manifest(manifest_path)
+    _conn = resolve_pat_connection({}, _manifest)
+    if _conn:
+        set_connection(_conn)
+
+    # ── Manifest auto-gate ────────────────────────────────────────────────────
+    # Runs before EVERY subcommand. If manifest exists and is broken:
+    #   1. Auto-repair structural gaps (missing schema_version, [snowflake],
+    #      [prereqs] sections) via ensure_manifest_defaults — silent success.
+    #   2. Warn loudly about non-structural issues that need manual action
+    #      (empty connection, missing sa_user/sa_role in a PAT entry, etc.).
+    # New projects with no manifest yet are skipped — setup-connection / create
+    # will initialise it correctly.
+    if manifest_path.exists() and ctx.invoked_subcommand not in (
+        "validate-manifest",
+        "setup-connection",
+    ):
+        _gdata = load_manifest(manifest_path)
+        _issues_before = validate_manifest(_gdata)
+        if _issues_before:
+            ensure_manifest_defaults(_gdata, manifest_path)
+            save_manifest(manifest_path, _gdata)
+            _issues_after = validate_manifest(_gdata)
+            if _issues_after:
+                # Non-structural issues remain — warn but don't block.
+                # Commands that use --profile or remove will fail naturally
+                # if the field they need is missing.
+                click.echo(
+                    f"\n⚠️  manifest.toml has {len(_issues_after)} issue(s) "
+                    "that need attention before this operation:",
+                    err=True,
+                )
+                for _issue in _issues_after:
+                    click.echo(f"   ✗ {_issue}", err=True)
+                click.echo(
+                    "   Run 'sfutils-pat validate-manifest' for details "
+                    "or 'sfutils-pat setup-connection' to fix an empty connection.\n",
+                    err=True,
+                )
+            else:
+                click.echo(
+                    f"[manifest] auto-repaired "
+                    f"{len(_issues_before)} structural gap(s)",
+                    err=True,
+                )
 
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
 
 
 @cli.command(name="create")
-@click.option("--user", "-u", envvar="SA_USER", required=True, help="Service account user name")
-@click.option("--role", "-r", envvar="SA_ROLE", required=True, help="Role restriction for the PAT")
+@click.option("--user", "-u", envvar="SA_USER", default=None, help="Service account user name")
+@click.option("--role", "-r", envvar="SA_ROLE", default=None, help="Role restriction for the PAT")
+@click.option(
+    "--profile", "-p",
+    default=None,
+    help="PAT label in manifest.toml — resolves --user/--role when not explicitly provided",
+)
 @click.option(
     "--db",
     "-d",
@@ -552,6 +685,14 @@ def cli(ctx: click.Context, verbose: bool, debug: bool, comment: str | None) -> 
 )
 @click.option("--dry-run", is_flag=True, help="Preview without making changes")
 @click.option(
+    "--connection",
+    default=None,
+    help=(
+        "Snowflake connection name for this PAT (overrides manifest [snowflake].connection). "
+        "account/user/account_url are resolved from this connection and stored in the PAT entry."
+    ),
+)
+@click.option(
     "--admin-role",
     "-a",
     default="accountadmin",
@@ -598,8 +739,9 @@ def cli(ctx: click.Context, verbose: bool, debug: bool, comment: str | None) -> 
 @click.pass_context
 def create_command(
     ctx: click.Context,
-    user: str,
-    role: str,
+    user: str | None,
+    role: str | None,
+    profile: str | None,
     db: str,
     pat_name: str | None,
     rotate: bool,
@@ -612,6 +754,7 @@ def create_command(
     default_expiry_days: int,
     max_expiry_days: int,
     dry_run: bool,
+    connection: str | None,
     admin_role: str,
     force: bool,
     output: str,
@@ -632,7 +775,7 @@ def create_command(
     2. Create network rule and policy (unless --skip-network)
     3. Create authentication policy
     4. Create or rotate PAT
-    5. Store PAT in OS keyring; update .env with SA_USER and SA_ROLE only
+    5. Store PAT in OS keyring; update manifest.toml and .env
     6. Verify connection using PAT loaded from keyring
 
     \b
@@ -640,12 +783,30 @@ def create_command(
         # Basic usage - local IP only (most secure)
         pat.py create --user my_sa --role demo_role --db my_db
 
+        # Use a saved profile from manifest.toml
+        pat.py create --profile app-runner --db my_db
+
         # Skip network (created by sf-utils-networks skill)
         pat.py create --user my_sa --role demo_role --db my_db --skip-network
 
         # Allow GitHub Actions (Snowflake-managed network rule on the policy)
         pat.py create --user ci_sa --role ci_role --db my_db --allow-gh
     """
+    manifest_path: Path = ctx.obj.get("manifest_path", Path(".sfutils/manifest.toml"))
+    user, role = _resolve_user_role_from_profile(profile, user, role, manifest_path)
+    if not user:
+        raise click.UsageError(
+            "--user / SA_USER is required (or use --profile to resolve from manifest.toml)"
+        )
+    if not role:
+        raise click.UsageError(
+            "--role / SA_ROLE is required (or use --profile to resolve from manifest.toml)"
+        )
+
+    # If a connection override is provided, switch the active connection so all
+    # subsequent snow SQL calls use it, and fetch its metadata for the PAT entry.
+    if connection:
+        set_connection(connection)
     if not pat_name:
         pat_name = f"{user}_pat".upper()
 
@@ -814,7 +975,49 @@ def create_command(
         )
         click.echo(password)
 
-    update_env_non_secrets(env_path, user, role)
+    _now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _label = user.lower().replace("_", "-")
+    _pat_config: dict = {
+        "status": "COMPLETE",
+        "created_at": _now,
+        "updated_at": _now,
+        "sa_user": user.upper(),
+        "sa_role": role.upper(),
+        "pat_name": pat_name.upper(),
+        "comment_prefix": comment_prefix,
+        "sf_utils_db": db.upper(),
+        "admin_role": admin_role.upper(),
+        "default_expiry_days": default_expiry_days,
+        "max_expiry_days": max_expiry_days,
+        "local_ip": cidrs[0] if cidrs else "",
+        "allow_github": allow_gh,
+        "allow_google": allow_google,
+        "extra_cidrs": list(extra_cidrs),
+        "resources": {
+            "network_rule": (
+                f"{db.upper()}.NETWORKS.{user.upper()}_NETWORK_RULE"
+                if not skip_network else ""
+            ),
+            "network_policy": f"{user.upper()}_NETWORK_POLICY" if not skip_network else "",
+            "auth_policy": f"{db.upper()}.POLICIES.{user.upper()}_AUTH_POLICY",
+            "service_user": user.upper(),
+            "service_role": role.upper(),
+            "pat": pat_name.upper(),
+        },
+        "cleanup": {
+            "user": user.upper(),
+            "db": db.upper(),
+            "drop_user": True,
+        },
+    }
+    # Store connection metadata only when an explicit override is provided.
+    # The root [snowflake] block already holds metadata for the default connection.
+    if connection:
+        _pat_config["connection"] = connection
+        _pat_config["account"] = account
+        _pat_config["user"] = user  # Snowflake login user (from connection test)
+        _pat_config["account_url"] = f"https://{host}" if host else ""
+    _persist_pat_state(manifest_path, env_path, user, role, _label, _pat_config)
     if dot_env_file:
         update_env_non_secrets(dot_env_file, user, role)
 
@@ -842,12 +1045,17 @@ def create_command(
     click.echo()
     click.echo("=" * 50)
     click.echo("✓ PAT setup completed successfully!")
-    click.echo("  PAT stored in OS keyring (not written to .env)")
+    click.echo("  PAT stored in OS keyring (not written to .env or manifest token fields)")
     click.echo("=" * 50)
 
 
 @cli.command(name="remove")
-@click.option("--user", "-u", envvar="SA_USER", required=True, help="Service account user name")
+@click.option("--user", "-u", envvar="SA_USER", default=None, help="Service account user name")
+@click.option(
+    "--profile", "-p",
+    default=None,
+    help="PAT label in manifest.toml — resolves --user when not explicitly provided",
+)
 @click.option(
     "--db",
     "-d",
@@ -877,8 +1085,11 @@ def create_command(
     default=False,
     help="Skip per-step confirmation prompts (required in non-interactive terminals)",
 )
+@click.pass_context
 def remove_command(
-    user: str,
+    ctx: click.Context,
+    user: str | None,
+    profile: str | None,
     db: str,
     pat_name: str | None,
     drop_user: bool,
@@ -891,7 +1102,7 @@ def remove_command(
     Remove PAT and associated objects for a service user.
 
     Each destructive step asks for confirmation unless --yes. Step 5 only strips
-    legacy raw-PAT lines from .env (no confirmation).
+    legacy raw-PAT lines from .env and updates manifest.toml status (no confirmation).
 
     \b
     Steps:
@@ -899,8 +1110,14 @@ def remove_command(
     2. Remove network policy and rule (unless --pat-only)
     3. Remove authentication policy (unless --pat-only)
     4. Drop service user (if --drop-user)
-    5. Strip legacy PAT lines from .env (SA_USER / SA_ROLE unchanged)
+    5. Strip legacy PAT lines from .env; mark REMOVED in manifest.toml
     """
+    manifest_path: Path = ctx.obj.get("manifest_path", Path(".sfutils/manifest.toml"))
+    user, _ = _resolve_user_role_from_profile(profile, user, None, manifest_path)
+    if not user:
+        raise click.UsageError(
+            "--user / SA_USER is required (or use --profile to resolve from manifest.toml)"
+        )
     click.echo("=" * 50)
     click.echo("Snowflake PAT Manager - Remove")
     click.echo("=" * 50)
@@ -990,12 +1207,16 @@ def remove_command(
         remove_service_user(user=user, admin_role=admin_role)
         click.echo()
 
-    # Step 5: non-secret cleanup only — no confirmation (legacy raw-PAT lines in .env).
+    # Step 5: non-secret cleanup — no confirmation (legacy raw-PAT lines in .env + TOML status).
     click.echo("─" * 40)
-    click.echo("Step 5: Strip legacy PAT lines from .env")
+    click.echo("Step 5: Strip legacy PAT lines from .env; update manifest.toml")
     click.echo("─" * 40)
     click.echo(f"  File: {env_path} (SA_USER / SA_ROLE are not removed)")
     clear_env(env_path=env_path)
+    _manifest_data = load_manifest(manifest_path)
+    update_pat_status(_manifest_data, user, "REMOVED")
+    save_manifest(manifest_path, _manifest_data)
+    click.echo(f"  manifest.toml: marked {user} as REMOVED")
     click.echo()
 
     click.echo("=" * 50)
@@ -1217,6 +1438,316 @@ def show_pat_command(user: str, pat_name: str | None, yes: bool) -> None:
         err=True,
     )
     click.echo(secret)
+
+
+@cli.command(name="list")
+@click.pass_context
+def list_command(ctx: click.Context) -> None:
+    """List all PATs recorded in manifest.toml."""
+    manifest_path: Path = ctx.obj.get("manifest_path", Path(".sfutils/manifest.toml"))
+    data = load_manifest(manifest_path)
+    pats = data.get("pat", {})
+
+    if not pats:
+        if not manifest_path.exists():
+            click.echo(f"No manifest found at {manifest_path}. Run 'sfutils-pat create' first.")
+        else:
+            click.echo("No PAT entries found in manifest.toml.")
+        return
+
+    # Header
+    click.echo(f"\n{'LABEL':<20} {'SA_USER':<35} {'STATUS':<12} {'EXPIRY (def/max)'}")
+    click.echo("─" * 85)
+    for label, pat in pats.items():
+        sa_user = pat.get("sa_user", "—")
+        status = pat.get("status", "—")
+        default_exp = pat.get("default_expiry_days", "?")
+        max_exp = pat.get("max_expiry_days", "?")
+        expiry = f"{default_exp}d / {max_exp}d"
+        # Colour-code status
+        status_display = (
+            click.style(status, fg="green") if status == "COMPLETE"
+            else click.style(status, fg="yellow") if status == "IN_PROGRESS"
+            else click.style(status, fg="red") if status == "REMOVED"
+            else status
+        )
+        click.echo(f"{label:<20} {sa_user:<35} {status_display:<12} {expiry}")
+    click.echo()
+
+
+@cli.command(name="migrate")
+@click.option(
+    "--env-path",
+    type=click.Path(path_type=Path),
+    default=Path(".env"),
+    help=".env file to read from (default: .env)",
+)
+@click.option(
+    "--manifest-md",
+    type=click.Path(path_type=Path),
+    default=Path(".sfutils/sfutils-manifest.md"),
+    help="Existing markdown manifest to read resources from "
+         "(default: .sfutils/sfutils-manifest.md)",
+)
+@click.option("--dry-run", is_flag=True, help="Print what would be written without writing")
+@click.pass_context
+def migrate_command(
+    ctx: click.Context,
+    env_path: Path,
+    manifest_md: Path,
+    dry_run: bool,
+) -> None:
+    """Migrate .env + sfutils-manifest.md to manifest.toml.
+
+    Reads SA_USER, SA_ROLE, SFUTILS_DB, and Snowflake connection details from .env,
+    optionally reads resource names from sfutils-manifest.md, and writes a
+    manifest.toml. Does NOT delete the old files.
+
+    \b
+    Example:
+        sfutils-pat migrate --dry-run
+        sfutils-pat migrate
+    """
+    manifest_path: Path = ctx.obj.get("manifest_path", Path(".sfutils/manifest.toml"))
+
+    env_vals = dotenv_values(env_path) if env_path.exists() else {}
+
+    # Build manifest dict from .env values
+    sa_user = env_vals.get("SA_USER", "")
+    sa_role = env_vals.get("SA_ROLE", "")
+    sf_utils_db = (
+        env_vals.get("SF_UTILS_DB")
+        or env_vals.get("SFUTILS_DB")
+        or env_vals.get("SNOW_UTILS_DB")
+        or ""
+    )
+    connection = env_vals.get("SNOWFLAKE_DEFAULT_CONNECTION_NAME", "")
+    account = env_vals.get("SNOWFLAKE_ACCOUNT", "")
+    user = env_vals.get("SNOWFLAKE_USER", "")
+    account_url = env_vals.get("SNOWFLAKE_ACCOUNT_URL", "")
+
+    # Load existing manifest or start fresh
+    data = load_manifest(manifest_path)
+    if not data:
+        data = {
+            "schema_version": "1",
+            "project_name": Path.cwd().name,
+            "created_at": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
+    if "snowflake" not in data:
+        data["snowflake"] = {}
+    if connection:
+        data["snowflake"]["connection"] = connection
+    if account:
+        data["snowflake"]["account"] = account
+    if user:
+        data["snowflake"]["user"] = user
+    if account_url:
+        data["snowflake"]["account_url"] = account_url
+    if sf_utils_db:
+        data["snowflake"]["sf_utils_db"] = sf_utils_db
+
+    # Build a PAT entry from .env if SA_USER is present
+    if sa_user:
+        _now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _label = sa_user.lower().replace("_", "-")
+        pat_config: dict = {
+            "status": "COMPLETE",
+            "created_at": _now,
+            "updated_at": _now,
+            "sa_user": sa_user.upper(),
+            "sa_role": sa_role.upper(),
+            "pat_name": f"{sa_user.upper()}_PAT",
+            "comment_prefix": infer_comment_prefix(sa_user),
+            "sf_utils_db": sf_utils_db.upper(),
+            "admin_role": "ACCOUNTADMIN",
+            "default_expiry_days": 7,
+            "max_expiry_days": 30,
+            "local_ip": "",
+            "allow_github": False,
+            "allow_google": False,
+            "extra_cidrs": [],
+            "resources": {
+                "network_rule": f"{sf_utils_db.upper()}.NETWORKS.{sa_user.upper()}_NETWORK_RULE",
+                "network_policy": f"{sa_user.upper()}_NETWORK_POLICY",
+                "auth_policy": f"{sf_utils_db.upper()}.POLICIES.{sa_user.upper()}_AUTH_POLICY",
+                "service_user": sa_user.upper(),
+                "service_role": sa_role.upper(),
+                "pat": f"{sa_user.upper()}_PAT",
+            },
+            "cleanup": {
+                "user": sa_user.upper(),
+                "db": sf_utils_db.upper(),
+                "drop_user": True,
+            },
+        }
+        upsert_pat(data, _label, pat_config)
+
+    if dry_run:
+        click.echo(f"[dry-run] Would write to: {manifest_path}")
+        click.echo(f"[dry-run] Snowflake connection: {connection or '(not set)'}")
+        click.echo(f"[dry-run] PAT entries: {len(data.get('pat', {}))}")
+        for lbl, pat in data.get("pat", {}).items():
+            sts = pat.get("status", "?")
+            usr = pat.get("sa_user", "?")
+            click.echo(f"  - {lbl} / {usr} ({sts})")
+        return
+
+    save_manifest(manifest_path, data)
+    click.echo(f"✓ Written to {manifest_path}")
+    click.echo(f"  PAT entries: {len(data.get('pat', {}))}")
+    click.echo("  Old files (.env, sfutils-manifest.md) were NOT modified.")
+
+
+@cli.command(name="validate-manifest")
+@click.option(
+    "--fix",
+    is_flag=True,
+    default=False,
+    help=(
+        "Fill in any missing sections with sensible defaults before validating. "
+        "Useful for repairing manifests from older projects."
+    ),
+)
+@click.pass_context
+def validate_manifest_command(ctx: click.Context, fix: bool) -> None:
+    """Validate manifest.toml structure and report issues.
+
+    Checks that all required sections and fields are present and well-formed.
+    Exits with code 1 if validation fails so it can gate CI/CD workflows.
+
+    Use --fix to automatically fill in any missing sections with defaults
+    (equivalent to running 'sfutils-pat setup-connection' for structural gaps,
+    without touching connection credentials).
+
+    \b
+    Example:
+        sfutils-pat validate-manifest
+        sfutils-pat validate-manifest --fix   # repair then validate
+    """
+    manifest_path: Path = ctx.obj.get("manifest_path", Path(".sfutils/manifest.toml"))
+
+    if not manifest_path.exists():
+        if fix:
+            # Create a fresh manifest skeleton from scratch.
+            data: dict = {}
+            ensure_manifest_defaults(data, manifest_path)
+            save_manifest(manifest_path, data)
+            click.echo(f"✓ Created {manifest_path} with default structure")
+        else:
+            raise click.ClickException(
+                f"manifest.toml not found at {manifest_path}. "
+                "Run 'sfutils-pat setup-connection' to initialise, "
+                "or use --fix to create a skeleton."
+            )
+    else:
+        data = load_manifest(manifest_path)
+
+    if fix:
+        before = validate_manifest(data)
+        ensure_manifest_defaults(data, manifest_path)
+        save_manifest(manifest_path, data)
+        after = validate_manifest(data)
+        fixed_count = len(before) - len(after)
+        if fixed_count > 0:
+            click.echo(f"✓ Repaired {fixed_count} issue(s) in {manifest_path}")
+        # Re-read the saved file to validate final state.
+        data = load_manifest(manifest_path)
+
+    issues = validate_manifest(data)
+
+    if issues:
+        click.echo(f"✗ manifest.toml validation failed ({len(issues)} issue(s)):", err=True)
+        for issue in issues:
+            click.echo(f"  ✗ {issue}", err=True)
+        if not fix:
+            click.echo(
+                "  Tip: run 'sfutils-pat validate-manifest --fix' to repair structural gaps",
+                err=True,
+            )
+        raise click.ClickException("Fix the issues above and re-run.")
+
+    pat_count = len(data.get("pat", {}))
+    click.echo(
+        f"✓ manifest.toml is valid  "
+        f"(connection: {data.get('snowflake', {}).get('connection', '(not set)')}, "
+        f"PATs: {pat_count})"
+    )
+
+
+@cli.command(name="setup-connection")
+@click.option(
+    "--connection",
+    "-c",
+    required=True,
+    help="Snowflake connection name to use for this project (from snow connection list)",
+)
+@click.option(
+    "--admin-role",
+    default=None,
+    help="Admin role to cache in manifest.toml (default: ACCOUNTADMIN)",
+)
+@click.pass_context
+def setup_connection_command(
+    ctx: click.Context,
+    connection: str,
+    admin_role: str | None,
+) -> None:
+    """Persist a Snowflake connection to manifest.toml and cache its metadata.
+
+    Run this once per project after picking a connection from 'snow connection list'.
+    Writes [snowflake].connection + account/user/account_url to manifest.toml so
+    manifest.toml becomes the source of truth for this project.
+
+    \b
+    Example:
+        snow connection list              # see available connections
+        sfutils-pat setup-connection -c local-oauth
+    """
+    manifest_path: Path = ctx.obj.get("manifest_path", Path(".sfutils/manifest.toml"))
+
+    # Switch the active connection for this invocation.
+    set_connection(connection)
+
+    # Fetch connection metadata.
+    click.echo(f"Testing connection '{connection}'...")
+    account, host = get_snowflake_connection_metadata()
+
+    # Load + ensure defaults + write connection block.
+    data = load_manifest(manifest_path)
+    ensure_manifest_defaults(data, manifest_path)
+
+    sf = data["snowflake"]
+    sf["connection"] = connection
+    sf["account"] = account
+    sf["account_url"] = f"https://{host}" if host else ""
+    if admin_role:
+        sf["admin_role"] = admin_role
+
+    # Derive the Snowflake login user from the connection test output.
+    # get_snowflake_connection_metadata returns (account, host); get full
+    # output for user via the same snow connection test call.
+    try:
+        _res = subprocess.run(
+            ["snow", "connection", "test", "-c", connection, "--format", "json"],
+            capture_output=True, text=True, check=False,
+        )
+        if _res.returncode == 0 and _res.stdout.strip():
+            _data = json.loads(_res.stdout)
+            _user = _data.get("User") or _data.get("user") or ""
+            if _user:
+                sf["user"] = str(_user).strip()
+    except Exception:
+        pass  # non-fatal — user field just stays empty
+
+    save_manifest(manifest_path, data)
+
+    click.echo(f"✓ Connection '{connection}' saved to {manifest_path}")
+    click.echo(f"  account:     {account}")
+    click.echo(f"  account_url: {sf.get('account_url', '')}")
+    if sf.get("user"):
+        click.echo(f"  user:        {sf['user']}")
 
 
 if __name__ == "__main__":
