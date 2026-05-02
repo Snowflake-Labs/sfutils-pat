@@ -1721,6 +1721,17 @@ def migrate_command(
             "service_role": parsed_res.get("service_role", sa_role.upper()),
             "pat":          parsed_res.get("pat", f"{sa_user.upper()}_PAT"),
         }
+        # Remove any stale PAT entries for the same sa_user with a different label.
+        # Happens when a previous migration used a different label derivation
+        # (e.g. infer_comment_prefix stripped _RUNNER suffix vs full sa_user now).
+        stale = [
+            lbl for lbl, entry in data.get("pat", {}).items()
+            if entry.get("sa_user", "").upper() == sa_user.upper() and lbl != _label
+        ]
+        for stale_lbl in stale:
+            click.echo(f"  [migrate] removing stale '[pat.{stale_lbl}]' → '[pat.{_label}]'")
+            del data["pat"][stale_lbl]
+
         upsert_pat(data, _label, {
             "status":             pat_status,
             "created_at":         created_at,
