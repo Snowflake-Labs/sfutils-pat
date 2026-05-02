@@ -18,16 +18,20 @@ Checks whether the SF_UTILS_DB database exists (via Snowflake CLI). Does not
 validate SA_ROLE or other skill-specific objects.
 """
 
+import datetime
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import click
 from dotenv import load_dotenv
+
+from sfutils_pat._toml_manifest import load_manifest, save_manifest
 
 load_dotenv()
 
@@ -66,9 +70,32 @@ def require_snow_cli() -> None:
         sys.exit(2)
 
 
-def run_sql(query: str) -> list | None:
-    """Execute SQL and return parsed JSON result. Uses active connection from env."""
+def _manifest_connection(manifest_path: str = ".sfutils/manifest.toml") -> str | None:
+    """Read [snowflake].connection from manifest.toml.  Returns None if not set."""
+    p = Path(manifest_path)
+    if not p.exists():
+        return None
+    try:
+        with p.open("rb") as fh:
+            data = tomllib.load(fh)
+        return data.get("snowflake", {}).get("connection") or None
+    except Exception:
+        return None
+
+
+def run_sql(query: str, connection: str | None = None) -> list | None:
+    """Execute SQL and return parsed JSON result.
+
+    Uses *connection* if provided, otherwise falls back to the manifest
+    connection, then the SNOWFLAKE_DEFAULT_CONNECTION_NAME env var (snow CLI
+    default), keeping behaviour consistent with the rest of sfutils-pat.
+    """
+    conn = connection or _manifest_connection() or os.environ.get(
+        "SNOWFLAKE_DEFAULT_CONNECTION_NAME"
+    )
     cmd = ["snow", "sql", "--query", query, "--format", "json"]
+    if conn:
+        cmd.extend(["-c", conn])
 
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
@@ -144,6 +171,74 @@ def do_run_setup(db_name: str, script_dir: Path, admin_role: str) -> bool:
         return False
 
 
+def _fetch_connection_metadata(connection: str | None) -> dict:
+    """Run snow connection test and return account/user/account_url as a dict.
+
+    Returns an empty dict if the test fails or snow CLI is unavailable.
+    Best-effort — callers should not crash on failure.
+    """
+    cmd = ["snow", "connection", "test", "--format", "json"]
+    if connection:
+        cmd.extend(["-c", connection])
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=30)
+        if result.returncode != 0 or not result.stdout.strip():
+            return {}
+        data = json.loads(result.stdout)
+        account = data.get("Account") or data.get("account") or ""
+        host = (
+            data.get("Host") or data.get("host")
+            or data.get("SnowflakeHost") or data.get("snowflake_host")
+            or ""
+        )
+        user = data.get("User") or data.get("user") or ""
+        return {
+            "account": str(account).strip(),
+            "user": str(user).strip(),
+            "account_url": f"https://{host}".strip() if host else "",
+        }
+    except Exception:
+        return {}
+
+
+def _update_manifest_prereqs(
+    sf_utils_db: str,
+    manifest_path: Path = Path(".sfutils/manifest.toml"),
+    connection: str | None = None,
+    admin_role: str | None = None,
+) -> None:
+    """Write sf_utils_db, connection metadata and tools_verified into manifest.toml.
+
+    Best-effort — does not raise if manifest cannot be written (e.g. read-only fs).
+    """
+    try:
+        data = load_manifest(manifest_path)
+        if "snowflake" not in data:
+            data["snowflake"] = {}
+        data["snowflake"]["sf_utils_db"] = sf_utils_db
+        if connection:
+            data["snowflake"]["connection"] = connection
+        if admin_role:
+            data["snowflake"]["admin_role"] = admin_role
+
+        # Cache account/user/account_url from the active connection.
+        meta = _fetch_connection_metadata(connection)
+        if meta.get("account"):
+            data["snowflake"]["account"] = meta["account"]
+        if meta.get("user"):
+            data["snowflake"]["user"] = meta["user"]
+        if meta.get("account_url"):
+            data["snowflake"]["account_url"] = meta["account_url"]
+
+        data["prereqs"] = {
+            "tools_verified": datetime.date.today().isoformat(),
+            "infra_ready": True,
+        }
+        save_manifest(manifest_path, data)
+    except Exception:
+        pass  # non-fatal: manifest is supplementary, not required for infra check
+
+
 @click.command()
 @click.option(
     "--database",
@@ -208,6 +303,11 @@ def check(database: str | None, run_setup: bool, suggest: bool, admin_role: str 
         click.echo(click.style("✓ Infrastructure ready", fg="green"))
         click.echo(f"  Database: {db_name}")
         click.echo(f"  Schemas: {db_name}.NETWORKS, {db_name}.POLICIES")
+        _update_manifest_prereqs(
+            sf_utils_db=db_name,
+            connection=os.environ.get("SNOWFLAKE_DEFAULT_CONNECTION_NAME"),
+            admin_role=resolved_sa_admin_role(admin_role=admin_role),
+        )
         sys.exit(0)
 
     click.echo(click.style("⚠ Infrastructure not ready", fg="yellow"))
@@ -223,6 +323,12 @@ def check(database: str | None, run_setup: bool, suggest: bool, admin_role: str 
 
     resolved_role = resolved_sa_admin_role(admin_role=admin_role)
     success = do_run_setup(db_name, script_dir, resolved_role)
+    if success:
+        _update_manifest_prereqs(
+            sf_utils_db=db_name,
+            connection=os.environ.get("SNOWFLAKE_DEFAULT_CONNECTION_NAME"),
+            admin_role=resolved_role,
+        )
     sys.exit(0 if success else 1)
 
 
