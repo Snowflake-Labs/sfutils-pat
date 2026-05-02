@@ -1531,7 +1531,9 @@ def _parse_legacy_manifest(path: Path) -> dict:
             ("sa_user",        r"\*\*User:\*\*\s*(\S+)"),
             ("sa_role",        r"\*\*Role:\*\*\s*(\S+)"),
             ("sf_utils_db",    r"\*\*Database:\*\*\s*(\S+)"),
-            ("status",         r"\*\*Status:\*\*\s*(\S+)"),
+            # Match both bold (**Status:** X) and plain (Status: X) — the old
+            # Remove Flow sometimes wrote plain text when updating the manifest.
+            ("status",         r"(?:\*\*Status:\*\*|^Status:)\s*(\S+)"),
             ("comment_prefix", r"\*\*Comment:\*\*\s*(\S+)"),
             ("created_at",     r"\*\*Created:\*\*\s*(.+?)$"),
         ]
@@ -1653,7 +1655,9 @@ def migrate_command(
     admin_role      = md.get("admin_role", "ACCOUNTADMIN")
     project_name    = md.get("project_name") or Path.cwd().name
     tools_verified  = md.get("tools_verified") or datetime.date.today().isoformat()
-    pat_status      = (md.get("status") or "COMPLETE").upper()
+    # Default to REMOVED when status can't be determined — safer than COMPLETE:
+    # REMOVED signals "needs to be re-created", COMPLETE would falsely imply everything exists.
+    pat_status      = (md.get("status") or "REMOVED").upper()
     default_expiry  = md.get("default_expiry_days", 7)
     max_expiry      = md.get("max_expiry_days", 30)
     created_at      = (
@@ -1690,7 +1694,7 @@ def migrate_command(
 
     data["prereqs"] = {
         "tools_verified": tools_verified,
-        "infra_ready": bool(sf_utils_db),  # only true when sf_utils_db was resolved
+        "infra_ready": False,  # set True only by check-setup after Snowflake confirms db exists
     }
 
     # ── Step 4: Build PAT entry ────────────────────────────────────────────────

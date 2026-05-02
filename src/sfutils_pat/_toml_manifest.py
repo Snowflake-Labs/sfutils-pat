@@ -339,6 +339,21 @@ def validate_manifest(data: dict) -> list[str]:
         prereqs = data["prereqs"]
         if not prereqs.get("tools_verified"):
             issues.append("[prereqs].tools_verified is empty")
+        if not prereqs.get("infra_ready", True):
+            # infra_ready = false means the database has never been Snowflake-verified.
+            # Set by migrate when sf_utils_db name was found but db existence unconfirmed.
+            # Must run check-setup before creating PAT resources.
+            sf_db = data.get("snowflake", {}).get("sf_utils_db", "")
+            if sf_db:
+                issues.append(
+                    f"[prereqs].infra_ready = false — database '{sf_db}' not yet "
+                    "verified in Snowflake; run 'sfutils-pat check-setup' first"
+                )
+            else:
+                issues.append(
+                    "[prereqs].infra_ready = false — run 'sfutils-pat check-setup' "
+                    "to set up the infra database before creating PAT resources"
+                )
 
     # [pat.*] entries
     for label, pat in data.get("pat", {}).items():
