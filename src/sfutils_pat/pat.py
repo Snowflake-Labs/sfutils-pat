@@ -1488,6 +1488,102 @@ def list_command(ctx: click.Context) -> None:
     click.echo()
 
 
+def _parse_legacy_manifest(path: Path) -> dict:
+    """Extract structured data from a legacy sfutils-manifest.md file.
+
+    sfutils-manifest.md is the authoritative record of what was created.
+    Returns a dict with whatever fields could be parsed; missing fields are
+    absent from the dict (not None/empty) so callers can chain fallbacks cleanly.
+
+    Parsed fields: project_name, tools_verified, admin_role, sa_user, sa_role,
+    sf_utils_db, status, created_at, comment_prefix, default_expiry_days,
+    max_expiry_days, resources (dict of FQN strings).
+    """
+    if not path.exists():
+        return {}
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+
+    result: dict = {}
+
+    def _s(m_: re.Match | None) -> str | None:
+        return m_.group(1).strip() if m_ else None
+
+    # ── Global sections ───────────────────────────────────────────────────────
+    if v := _s(re.search(r"^project_name:\s*(.+?)$", content, re.MULTILINE)):
+        result["project_name"] = v
+    if v := _s(re.search(r"^tools_verified:\s*(.+?)$", content, re.MULTILINE)):
+        result["tools_verified"] = v
+    # admin_role stored as "programmatic-access-token: ROLE"
+    if v := _s(re.search(r"^programmatic-access-token:\s*(.+?)$", content, re.MULTILINE)):
+        result["admin_role"] = v
+
+    # ── PAT skill section ─────────────────────────────────────────────────────
+    start = content.find("<!-- START -- programmatic-access-token -->")
+    end = content.find("<!-- END -- programmatic-access-token -->")
+    pat_section = content[start: end if end != -1 else len(content)] if start != -1 else ""
+
+    if pat_section:
+        # Scalar key-value pairs (bold markdown format)
+        _kv = [
+            ("sa_user",        r"\*\*User:\*\*\s*(\S+)"),
+            ("sa_role",        r"\*\*Role:\*\*\s*(\S+)"),
+            ("sf_utils_db",    r"\*\*Database:\*\*\s*(\S+)"),
+            ("status",         r"\*\*Status:\*\*\s*(\S+)"),
+            ("comment_prefix", r"\*\*Comment:\*\*\s*(\S+)"),
+            ("created_at",     r"\*\*Created:\*\*\s*(.+?)$"),
+        ]
+        for field, pat in _kv:
+            if v := _s(re.search(pat, pat_section, re.MULTILINE)):
+                result[field] = v
+
+        for field, pat in [
+            ("default_expiry_days", r"\*\*Default Expiry \(days\):\*\*\s*(\d+)"),
+            ("max_expiry_days",     r"\*\*Max Expiry \(days\):\*\*\s*(\d+)"),
+        ]:
+            m = re.search(pat, pat_section)
+            if m:
+                result[field] = int(m.group(1))
+
+        # Resource FQNs from the resources table
+        # Row: | N | Type | Name | Location | Status |
+        resources: dict = {}
+        for row in re.finditer(
+            r"\|\s*\d+\s*\|\s*(.+?)\s*\|\s*(\S+)\s*\|\s*(.+?)\s*\|\s*\w+\s*\|",
+            pat_section,
+        ):
+            rtype = row.group(1).strip().lower()
+            rname = row.group(2).strip()
+            rloc  = row.group(3).strip()
+
+            if "network rule" in rtype:
+                # Extract sf_utils_db from Location = "SFUTILS_DB.NETWORKS"
+                if "." in rloc:
+                    result.setdefault("sf_utils_db", rloc.split(".")[0])
+                resources["network_rule"] = (
+                    f"{rloc}.{rname}" if rloc not in ("Account", "—") else rname
+                )
+            elif "network policy" in rtype:
+                resources["network_policy"] = rname
+            elif "auth" in rtype and "policy" in rtype:
+                resources["auth_policy"] = (
+                    f"{rloc}.{rname}" if "." in rloc else rname
+                )
+            elif "service role" in rtype:
+                resources["service_role"] = rname
+            elif "service user" in rtype:
+                resources["service_user"] = rname
+            elif rtype.strip() == "pat":
+                resources["pat"] = rname
+
+        if resources:
+            result["resources"] = resources
+
+    return result
+
+
 @cli.command(name="migrate")
 @click.option(
     "--env-path",
@@ -1512,9 +1608,13 @@ def migrate_command(
 ) -> None:
     """Migrate .env + sfutils-manifest.md to manifest.toml.
 
-    Reads SA_USER, SA_ROLE, SFUTILS_DB, and Snowflake connection details from .env,
-    optionally reads resource names from sfutils-manifest.md, and writes a
-    manifest.toml. Does NOT delete the old files.
+    sfutils-manifest.md is the PRIMARY source — it contains SA_USER, SA_ROLE,
+    SFUTILS_DB, admin_role, project_name, prereqs, resource FQNs, and status.
+    .env is SUPPLEMENTARY — it adds the Snowflake connection name and account
+    details that were never stored in the old markdown manifest.
+
+    Works correctly even when .env is absent or empty.
+    Does NOT delete the old files.
 
     \b
     Example:
@@ -1523,94 +1623,233 @@ def migrate_command(
     """
     manifest_path: Path = ctx.obj.get("manifest_path", Path(".sfutils/manifest.toml"))
 
+    # ── Step 1: Read both legacy sources ──────────────────────────────────────
     env_vals = dotenv_values(env_path) if env_path.exists() else {}
+    md = _parse_legacy_manifest(manifest_md)
 
-    # Build manifest dict from .env values
-    sa_user = env_vals.get("SA_USER", "")
-    sa_role = env_vals.get("SA_ROLE", "")
+    sources: list[str] = []
+    if env_path.exists():
+        sources.append(str(env_path))
+    if manifest_md.exists():
+        sources.append(str(manifest_md))
+
+    # ── Step 2: Resolve each field (manifest.md wins, .env supplements) ───────
+    # Connection info lives ONLY in .env (never in the old markdown manifest).
+    connection  = env_vals.get("SNOWFLAKE_DEFAULT_CONNECTION_NAME", "")
+    account     = env_vals.get("SNOWFLAKE_ACCOUNT", "")
+    sf_user_env = env_vals.get("SNOWFLAKE_USER", "")
+    account_url = env_vals.get("SNOWFLAKE_ACCOUNT_URL", "")
+
+    # PAT / infra: markdown manifest → .env → default
+    sa_user = md.get("sa_user") or env_vals.get("SA_USER", "")
+    sa_role = md.get("sa_role") or env_vals.get("SA_ROLE", "")
     sf_utils_db = (
-        env_vals.get("SF_UTILS_DB")
+        md.get("sf_utils_db")
+        or env_vals.get("SF_UTILS_DB")
         or env_vals.get("SFUTILS_DB")
         or env_vals.get("SNOW_UTILS_DB")
         or ""
     )
-    connection = env_vals.get("SNOWFLAKE_DEFAULT_CONNECTION_NAME", "")
-    account = env_vals.get("SNOWFLAKE_ACCOUNT", "")
-    user = env_vals.get("SNOWFLAKE_USER", "")
-    account_url = env_vals.get("SNOWFLAKE_ACCOUNT_URL", "")
+    admin_role      = md.get("admin_role", "ACCOUNTADMIN")
+    project_name    = md.get("project_name") or Path.cwd().name
+    tools_verified  = md.get("tools_verified") or datetime.date.today().isoformat()
+    pat_status      = (md.get("status") or "COMPLETE").upper()
+    default_expiry  = md.get("default_expiry_days", 7)
+    max_expiry      = md.get("max_expiry_days", 30)
+    created_at      = (
+        md.get("created_at")
+        or datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
+    comment_prefix  = md.get("comment_prefix") or infer_comment_prefix(sa_user) if sa_user else ""
 
-    # Load existing manifest or start fresh
+    # ── Step 3: Build manifest data structure ─────────────────────────────────
     data = load_manifest(manifest_path)
     if not data:
         data = {
             "schema_version": "1",
-            "project_name": Path.cwd().name,
+            "project_name": project_name,
             "created_at": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
+    else:
+        data.setdefault("project_name", project_name)
 
     if "snowflake" not in data:
         data["snowflake"] = {}
+    sf = data["snowflake"]
     if connection:
-        data["snowflake"]["connection"] = connection
+        sf["connection"] = connection
     if account:
-        data["snowflake"]["account"] = account
-    if user:
-        data["snowflake"]["user"] = user
+        sf["account"] = account
+    if sf_user_env:
+        sf["user"] = sf_user_env
     if account_url:
-        data["snowflake"]["account_url"] = account_url
+        sf["account_url"] = account_url
     if sf_utils_db:
-        data["snowflake"]["sf_utils_db"] = sf_utils_db
+        sf["sf_utils_db"] = sf_utils_db
+    sf.setdefault("admin_role", admin_role)
 
-    # Build a PAT entry from .env if SA_USER is present
+    data["prereqs"] = {
+        "tools_verified": tools_verified,
+        "infra_ready": True,  # migration implies infra already existed
+    }
+
+    # ── Step 4: Build PAT entry ────────────────────────────────────────────────
     if sa_user:
-        _now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         _label = sa_user.lower().replace("_", "-")
-        pat_config: dict = {
-            "status": "COMPLETE",
-            "created_at": _now,
-            "rotated_at": _now,
-            "sa_user": sa_user.upper(),
-            "sa_role": sa_role.upper(),
-            "pat_name": f"{sa_user.upper()}_PAT",
-            "comment_prefix": infer_comment_prefix(sa_user),
-            "sf_utils_db": sf_utils_db.upper(),
-            "admin_role": "ACCOUNTADMIN",
-            "default_expiry_days": 7,
-            "max_expiry_days": 30,
-            "local_ip": "",
-            "allow_github": False,
-            "allow_google": False,
-            "extra_cidrs": [],
-            "resources": {
-                "network_rule": f"{sf_utils_db.upper()}.NETWORKS.{sa_user.upper()}_NETWORK_RULE",
-                "network_policy": f"{sa_user.upper()}_NETWORK_POLICY",
-                "auth_policy": f"{sf_utils_db.upper()}.POLICIES.{sa_user.upper()}_AUTH_POLICY",
-                "service_user": sa_user.upper(),
-                "service_role": sa_role.upper(),
-                "pat": f"{sa_user.upper()}_PAT",
-            },
+        _now   = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        parsed_res = md.get("resources", {})
+
+        # Resource FQNs: prefer parsed values; fall back to naming convention
+        resources = {
+            "network_rule": (
+                parsed_res.get("network_rule")
+                or f"{sf_utils_db.upper()}.NETWORKS.{sa_user.upper()}_NETWORK_RULE"
+            ),
+            "network_policy": (
+                parsed_res.get("network_policy")
+                or f"{sa_user.upper()}_NETWORK_POLICY"
+            ),
+            "auth_policy": (
+                parsed_res.get("auth_policy")
+                or f"{sf_utils_db.upper()}.POLICIES.{sa_user.upper()}_AUTH_POLICY"
+            ),
+            "service_user": parsed_res.get("service_user", sa_user.upper()),
+            "service_role": parsed_res.get("service_role", sa_role.upper()),
+            "pat":          parsed_res.get("pat", f"{sa_user.upper()}_PAT"),
+        }
+        upsert_pat(data, _label, {
+            "status":             pat_status,
+            "created_at":         created_at,
+            "rotated_at":         _now,
+            "sa_user":            sa_user.upper(),
+            "sa_role":            sa_role.upper(),
+            "pat_name":           f"{sa_user.upper()}_PAT",
+            "comment_prefix":     comment_prefix,
+            "sf_utils_db":        sf_utils_db.upper(),
+            "admin_role":         admin_role,
+            "default_expiry_days": default_expiry,
+            "max_expiry_days":    max_expiry,
+            "local_ip":           "",
+            "allow_github":       False,
+            "allow_google":       False,
+            "extra_cidrs":        [],
+            "resources":          resources,
             "cleanup": {
-                "user": sa_user.upper(),
-                "db": sf_utils_db.upper(),
+                "user":      sa_user.upper(),
+                "db":        sf_utils_db.upper(),
                 "drop_user": True,
             },
-        }
-        upsert_pat(data, _label, pat_config)
+        })
 
+    # ── Step 5: Dry-run summary ────────────────────────────────────────────────
     if dry_run:
         click.echo(f"[dry-run] Would write to: {manifest_path}")
-        click.echo(f"[dry-run] Snowflake connection: {connection or '(not set)'}")
-        click.echo(f"[dry-run] PAT entries: {len(data.get('pat', {}))}")
-        for lbl, pat in data.get("pat", {}).items():
-            sts = pat.get("status", "?")
-            usr = pat.get("sa_user", "?")
-            click.echo(f"  - {lbl} / {usr} ({sts})")
+        click.echo(f"[dry-run] Sources:       {', '.join(sources) or '(none found)'}")
+        click.echo(f"[dry-run] project_name:  {data.get('project_name', '?')}")
+        conn_prompt = connection or "(not set — will prompt after write)"
+        click.echo(f"[dry-run] connection:    {conn_prompt}")
+        click.echo(f"[dry-run] sf_utils_db:   {sf_utils_db or '(not found)'}")
+        click.echo(f"[dry-run] admin_role:    {admin_role}")
+        click.echo(f"[dry-run] PAT entries:   {len(data.get('pat', {}))}")
+        for lbl, _pat in data.get("pat", {}).items():
+            click.echo(f"  [{lbl}] {_pat.get('sa_user', '?')} ({_pat.get('status', '?')})")
         return
 
+    # ── Step 6: Write manifest ─────────────────────────────────────────────────
     save_manifest(manifest_path, data)
     click.echo(f"✓ Written to {manifest_path}")
+    click.echo(f"  Sources:    {', '.join(sources) or '(none — skeleton only)'}")
     click.echo(f"  PAT entries: {len(data.get('pat', {}))}")
-    click.echo("  Old files (.env, sfutils-manifest.md) were NOT modified.")
+    click.echo("  Old files were NOT modified.")
+
+    # ── Step 7: Test connection (or pick a new one) ────────────────────────────
+    _active_conn = data["snowflake"].get("connection", "")
+
+    def _test_and_cache(conn_name: str) -> bool:
+        """Test conn_name; cache metadata into manifest on success. Returns True on pass."""
+        _r = subprocess.run(
+            ["snow", "connection", "test", "-c", conn_name, "--format", "json"],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+        if _r.returncode != 0:
+            return False
+        # Cache account metadata
+        try:
+            _meta = json.loads(_r.stdout)
+            _d = load_manifest(manifest_path)
+            if v := (_meta.get("Account") or _meta.get("account") or ""):
+                _d["snowflake"]["account"] = str(v).strip()
+            if v := (_meta.get("User") or _meta.get("user") or ""):
+                _d["snowflake"]["user"] = str(v).strip()
+            if v := (_meta.get("Host") or _meta.get("host") or ""):
+                _d["snowflake"]["account_url"] = f"https://{v}".strip()
+            _d["snowflake"]["connection"] = conn_name
+            save_manifest(manifest_path, _d)
+            set_connection(conn_name)
+        except Exception:
+            pass
+        return True
+
+    if _active_conn:
+        click.echo(f"\nTesting connection '{_active_conn}'...")
+        if _test_and_cache(_active_conn):
+            click.echo(f"✓ Connection '{_active_conn}' verified and cached in manifest.toml")
+            return
+        click.echo(f"⚠️  Connection '{_active_conn}' test failed — picking a new one.")
+    else:
+        click.echo("\n⚠️  No connection found in .env or manifest — pick one from the list below.")
+
+    # ── Step 8: Interactive connection picker ─────────────────────────────────
+    click.echo("Listing available connections...")
+    _list_r = subprocess.run(
+        ["snow", "connection", "list", "--format", "json"],
+        capture_output=True, text=True, check=False,
+    )
+    if _list_r.returncode != 0 or not _list_r.stdout.strip():
+        click.echo(
+            "Could not list connections. "
+            "Run 'sfutils-pat setup-connection -c <name>' to set the connection manually."
+        )
+        return
+    try:
+        _conns = json.loads(_list_r.stdout)
+    except json.JSONDecodeError:
+        click.echo("Failed to parse connection list. Run 'sfutils-pat setup-connection -c <name>'.")
+        return
+    if not _conns:
+        click.echo("No connections configured. Run 'snow connection add' first.")
+        return
+
+    click.echo()
+    for _i, _c in enumerate(_conns, 1):
+        _cname = _c.get("connection_name") or _c.get("name") or f"connection-{_i}"
+        _def   = " (default)" if _c.get("is_default") else ""
+        click.echo(f"  {_i}. {_cname}{_def}")
+    click.echo()
+
+    if sys.stdin.isatty():
+        _raw = click.prompt("Enter connection number", default="1")
+        try:
+            _chosen_name = (
+                _conns[int(_raw) - 1].get("connection_name")
+                or _conns[int(_raw) - 1].get("name")
+            )
+        except (ValueError, IndexError):
+            click.echo("Invalid choice. Run 'sfutils-pat setup-connection -c <name>'.")
+            return
+    else:
+        _dflt = next((_c for _c in _conns if _c.get("is_default")), _conns[0])
+        _chosen_name = _dflt.get("connection_name") or _dflt.get("name")
+        click.echo(f"Non-interactive: auto-selecting '{_chosen_name}'")
+
+    click.echo(f"\nTesting '{_chosen_name}'...")
+    if _test_and_cache(_chosen_name):
+        click.echo(f"✓ Connection '{_chosen_name}' verified and saved to {manifest_path}")
+    else:
+        click.echo(
+            f"⚠️  '{_chosen_name}' also failed. "
+            "Run 'sfutils-pat setup-connection -c <name>' to set the connection manually."
+        )
 
 
 @cli.command(name="validate-manifest")
