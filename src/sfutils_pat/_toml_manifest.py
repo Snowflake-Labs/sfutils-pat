@@ -50,7 +50,7 @@ SCHEMA_VERSION = "1"
 _PAT_SCALAR_KEYS = [
     "status",
     "created_at",
-    "updated_at",
+    "rotated_at",
     "removed_at",
     "sa_user",
     "sa_role",
@@ -295,16 +295,15 @@ def upsert_pat(data: dict, label: str, pat_config: dict) -> None:
 
 
 def update_pat_status(data: dict, sa_user: str, status: str) -> None:
-    """Set *status* on the PAT entry matching *sa_user* and update timestamps.
+    """Set *status* on the PAT entry matching *sa_user*.
 
-    Also sets *removed_at* when status is REMOVED.
+    Sets *removed_at* when status is REMOVED.
     Mutates *data* in place — caller must call save_manifest() afterwards.
     """
     now = _now_iso()
     for entry in data.get("pat", {}).values():
         if entry.get("sa_user", "").upper() == sa_user.upper():
             entry["status"] = status
-            entry["updated_at"] = now
             if status == "REMOVED":
                 entry["removed_at"] = now
             return
