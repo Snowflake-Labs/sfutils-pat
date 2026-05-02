@@ -1690,7 +1690,7 @@ def migrate_command(
 
     data["prereqs"] = {
         "tools_verified": tools_verified,
-        "infra_ready": True,  # migration implies infra already existed
+        "infra_ready": bool(sf_utils_db),  # only true when sf_utils_db was resolved
     }
 
     # ── Step 4: Build PAT entry ────────────────────────────────────────────────
