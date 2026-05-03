@@ -361,7 +361,7 @@ def validate_manifest(data: dict) -> list[str]:
         for field in ("status", "sa_user", "sa_role"):
             if not pat.get(field):
                 issues.append(f"{prefix} missing required field: {field}")
-        valid_statuses = {"IN_PROGRESS", "COMPLETE", "REMOVED"}
+        valid_statuses = {"CREATE_IN_PROGRESS", "COMPLETE", "DELETE_IN_PROGRESS", "REMOVED"}
         if pat.get("status") and pat["status"] not in valid_statuses:
             issues.append(
                 f"{prefix} invalid status '{pat['status']}' "

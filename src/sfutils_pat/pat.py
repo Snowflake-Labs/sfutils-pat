@@ -476,6 +476,40 @@ def verify_connection(
     click.echo("✓ Connection verified successfully")
 
 
+def _begin_pat_create(
+    manifest_path: Path,
+    label: str,
+    user: str,
+    role: str,
+    db: str,
+    admin_role: str,
+) -> None:
+    """Write status=CREATE_IN_PROGRESS to manifest BEFORE first SQL runs.
+
+    This ensures the manifest always reflects current intent even if creation
+    fails mid-way.  _persist_pat_state() will overwrite with COMPLETE on success.
+    Idempotent: skips the write if the entry already has status=COMPLETE
+    (so a dry-run + confirm re-run doesn't regress a healthy entry).
+    """
+    data = load_manifest(manifest_path)
+    ensure_manifest_defaults(data, manifest_path)
+    existing = data.get("pat", {}).get(label)
+    if existing and existing.get("status") == "COMPLETE":
+        return
+    _now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    upsert_pat(data, label, {
+        "status":    "CREATE_IN_PROGRESS",
+        "created_at": _now,
+        "rotated_at": _now,
+        "sa_user":   user.upper(),
+        "sa_role":   role.upper(),
+        "sf_utils_db": db.upper(),
+        "admin_role":  admin_role.upper(),
+    })
+    save_manifest(manifest_path, data)
+    click.echo(f"[manifest] '{label}' → CREATE_IN_PROGRESS", err=True)
+
+
 def _persist_pat_state(
     manifest_path: Path,
     env_path: Path,
@@ -921,6 +955,11 @@ def create_command(
         click.echo("Aborted.")
         return
 
+    # Write CREATE_IN_PROGRESS BEFORE any SQL runs so the manifest always
+    # reflects current intent even if creation fails mid-way.
+    _label = user.lower().replace("_", "-")
+    _begin_pat_create(manifest_path, _label, user, role, db, admin_role)
+
     setup_service_user(
         user=user, pat_role=role, comment_prefix=comment_prefix, admin_role=admin_role
     )
@@ -976,7 +1015,7 @@ def create_command(
         click.echo(password)
 
     _now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    _label = user.lower().replace("_", "-")
+    # _label already computed above (before first SQL)
     _pat_config: dict = {
         "status": "COMPLETE",
         "created_at": _now,
@@ -1135,6 +1174,14 @@ def remove_command(
         raise click.ClickException(
             "Non-interactive terminal: pass --yes to confirm all remove steps."
         )
+
+    # Write DELETE_IN_PROGRESS BEFORE any DROP commands run.
+    # If removal fails mid-way the manifest accurately reflects partial state.
+    # Step 5 will update to REMOVED after all resources are confirmed deleted.
+    _del_data = load_manifest(manifest_path)
+    update_pat_status(_del_data, user, "DELETE_IN_PROGRESS")
+    save_manifest(manifest_path, _del_data)
+    click.echo(f"[manifest] '{user.lower().replace('_', '-')}' → DELETE_IN_PROGRESS", err=True)
 
     click.echo("─" * 40)
     click.echo("Step 1: Remove PAT")
@@ -1583,6 +1630,12 @@ def _parse_legacy_manifest(path: Path) -> dict:
         if resources:
             result["resources"] = resources
 
+    # Migrate legacy bare status values to the new named states.
+    # IN_PROGRESS was written by old skill versions before CREATE_IN_PROGRESS existed.
+    _status_migration = {"IN_PROGRESS": "CREATE_IN_PROGRESS"}
+    if "status" in result:
+        result["status"] = _status_migration.get(result["status"], result["status"])
+
     return result
 
 
@@ -1655,9 +1708,9 @@ def migrate_command(
     admin_role      = md.get("admin_role", "ACCOUNTADMIN")
     project_name    = md.get("project_name") or Path.cwd().name
     tools_verified  = md.get("tools_verified") or datetime.date.today().isoformat()
-    # Default to REMOVED when status can't be determined — safer than COMPLETE:
-    # REMOVED signals "needs to be re-created", COMPLETE would falsely imply everything exists.
-    pat_status      = (md.get("status") or "REMOVED").upper()
+    # Default to REMOVED when status can't be determined — safer than COMPLETE.
+    # Legacy IN_PROGRESS is already migrated to CREATE_IN_PROGRESS by _parse_legacy_manifest.
+    pat_status = (md.get("status") or "REMOVED").upper()
     default_expiry  = md.get("default_expiry_days", 7)
     max_expiry      = md.get("max_expiry_days", 30)
     created_at      = (
