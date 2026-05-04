@@ -29,21 +29,18 @@ import tomllib
 from pathlib import Path
 
 import click
-from dotenv import load_dotenv
-
 from sfutils_pat._toml_manifest import load_manifest, save_manifest
-
-load_dotenv()
 
 DEFAULT_DB = "SF_UTILS"
 
 
 def resolved_sf_utils_db(*, database: str | None, default_db: str) -> str:
-    """Resolve database name: CLI arg, then SF_UTILS_DB, then legacy SNOW_UTILS_DB."""
+    """Resolve database name: CLI arg, then manifest, then env vars, then default."""
     return (
         database
-        or os.environ.get("SF_UTILS_DB")
-        or os.environ.get("SNOW_UTILS_DB")
+        or _manifest_sf_utils_db()          # TOML-first (written by _update_manifest_prereqs)
+        or os.environ.get("SF_UTILS_DB")    # legacy env fallback
+        or os.environ.get("SNOW_UTILS_DB")  # legacy env fallback
         or default_db
     )
 
@@ -79,6 +76,32 @@ def _manifest_connection(manifest_path: str = ".sfutils/manifest.toml") -> str |
         with p.open("rb") as fh:
             data = tomllib.load(fh)
         return data.get("snowflake", {}).get("connection") or None
+    except Exception:
+        return None
+
+
+def _manifest_user(manifest_path: str = ".sfutils/manifest.toml") -> str | None:
+    """Read [snowflake].user from manifest.toml.  Returns None if not set."""
+    p = Path(manifest_path)
+    if not p.exists():
+        return None
+    try:
+        with p.open("rb") as fh:
+            data = tomllib.load(fh)
+        return data.get("snowflake", {}).get("user") or None
+    except Exception:
+        return None
+
+
+def _manifest_sf_utils_db(manifest_path: str = ".sfutils/manifest.toml") -> str | None:
+    """Read [snowflake].sf_utils_db from manifest.toml.  Returns None if not set."""
+    p = Path(manifest_path)
+    if not p.exists():
+        return None
+    try:
+        with p.open("rb") as fh:
+            data = tomllib.load(fh)
+        return data.get("snowflake", {}).get("sf_utils_db") or None
     except Exception:
         return None
 
@@ -268,7 +291,7 @@ def check(database: str | None, run_setup: bool, suggest: bool, admin_role: str 
 
     require_snow_cli()
 
-    user = os.environ.get("SNOWFLAKE_USER", "").upper()
+    user = (_manifest_user() or os.environ.get("SNOWFLAKE_USER", "")).upper()
     default_db = f"{user}_SF_UTILS" if user else DEFAULT_DB
 
     if suggest:
