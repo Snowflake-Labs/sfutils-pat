@@ -142,7 +142,7 @@ def test_verify_fails_when_keyring_empty(_meta, _load):
 def test_show_pat_confirm_no_aborts(_meta, _load):
     runner = CliRunner()
     result = runner.invoke(cli, ["show-pat", "--user", "svc"], input="n\n")
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     assert "Aborted" in result.output
     assert "PAT_SECRET_VALUE" not in result.output
 
