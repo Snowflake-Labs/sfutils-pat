@@ -92,8 +92,7 @@ def _confirm_remove_step(*, skip_all_prompts: bool, message: str) -> bool:
     if skip_all_prompts:
         return True
     if not click.confirm(message, default=False):
-        click.echo("Aborted.")
-        return False
+        raise click.Abort()
     return True
 
 
@@ -952,8 +951,7 @@ def create_command(
         and not yes
         and not click.confirm("\nProceed with resource creation?", default=True)
     ):
-        click.echo("Aborted.")
-        return
+        raise click.Abort()
 
     # Write CREATE_IN_PROGRESS BEFORE any SQL runs so the manifest always
     # reflects current intent even if creation fails mid-way.
@@ -1490,8 +1488,7 @@ def show_pat_command(user: str, pat_name: str | None, yes: bool) -> None:
         "Do you want to continue?",
         default=False,
     ):
-        click.echo("Aborted.")
-        return
+        raise click.Abort()
 
     click.echo(
         "WARNING: PAT is printed to stdout; may be captured in shell history or logs.",
